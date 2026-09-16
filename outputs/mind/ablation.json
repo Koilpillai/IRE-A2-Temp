@@ -1,0 +1,100 @@
+{
+  "dataset": "mind",
+  "baseline_features": [
+    "popularity_log",
+    "freshness_hours",
+    "candidate_position_norm"
+  ],
+  "full_features": [
+    "hist_len",
+    "hist_category_match_frac",
+    "hist_category_match_recency",
+    "hist_embed_sim",
+    "session_position",
+    "popularity_log",
+    "freshness_hours",
+    "category_match",
+    "candidate_position",
+    "candidate_position_norm"
+  ],
+  "auc": {
+    "baseline": {
+      "mean": 0.5483990789335041,
+      "ci_low": 0.5462987488179232,
+      "ci_high": 0.5506568057233181,
+      "n": 73152
+    },
+    "full": {
+      "mean": 0.5460839136286172,
+      "ci_low": 0.5439712970399531,
+      "ci_high": 0.548594183105071,
+      "n": 73152
+    },
+    "paired_delta": {
+      "mean": -0.002315165304887112,
+      "ci_low": -0.004651198420907864,
+      "ci_high": -7.344265521016666e-05,
+      "excludes_zero": true
+    }
+  },
+  "mrr": {
+    "baseline": {
+      "mean": 0.24565381929320476,
+      "ci_low": 0.24371370433789213,
+      "ci_high": 0.2476493934870789,
+      "n": 73152
+    },
+    "full": {
+      "mean": 0.2626641001248327,
+      "ci_low": 0.2605058793240158,
+      "ci_high": 0.26482913246911655,
+      "n": 73152
+    },
+    "paired_delta": {
+      "mean": 0.017010280831627964,
+      "ci_low": 0.015308161531895471,
+      "ci_high": 0.018871739867956986,
+      "excludes_zero": true
+    }
+  },
+  "ndcg5": {
+    "baseline": {
+      "mean": 0.2621352571588267,
+      "ci_low": 0.25980600712063096,
+      "ci_high": 0.2645004816189149,
+      "n": 73152
+    },
+    "full": {
+      "mean": 0.2797080801591952,
+      "ci_low": 0.27711077866151607,
+      "ci_high": 0.282258211607719,
+      "n": 73152
+    },
+    "paired_delta": {
+      "mean": 0.017572823000368425,
+      "ci_low": 0.015691773374508135,
+      "ci_high": 0.01950599419405713,
+      "excludes_zero": true
+    }
+  },
+  "ndcg10": {
+    "baseline": {
+      "mean": 0.32024659482468887,
+      "ci_low": 0.3180342146641106,
+      "ci_high": 0.32247934416637064,
+      "n": 73152
+    },
+    "full": {
+      "mean": 0.33738603337868334,
+      "ci_low": 0.3350200423449539,
+      "ci_high": 0.3397180584892984,
+      "n": 73152
+    },
+    "paired_delta": {
+      "mean": 0.017139438553994493,
+      "ci_low": 0.015552619052604575,
+      "ci_high": 0.018792224643132807,
+      "excludes_zero": true
+    }
+  }
+}
