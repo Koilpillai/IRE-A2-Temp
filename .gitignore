@@ -40,3 +40,5 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .claude/
+datasets/
+.venv/
