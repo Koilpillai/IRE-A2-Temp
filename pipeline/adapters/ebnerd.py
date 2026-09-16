@@ -31,6 +31,35 @@ def load_user_history(history_path: Path) -> pd.DataFrame:
     return df.rename(columns={"article_id_fixed": "history"})
 
 
+def load_user_engagement_history(history_path: Path) -> pd.DataFrame:
+    """Full per-user history incl. per-item timestamp/read_time/scroll_percentage (A2 Q1).
+
+    EB-NeRD's own per-history-item timestamps let recency-weighting use real elapsed
+    time instead of the position-rank proxy MIND is stuck with (MIND's news.tsv has no
+    per-item timestamps at all -- see pipeline/features.py). `*_fixed` lists are already
+    chronological (oldest -> most recent), same convention as `article_id_fixed`.
+    """
+    df = pd.read_parquet(history_path, columns=[
+        "user_id", "article_id_fixed", "impression_time_fixed",
+        "read_time_fixed", "scroll_percentage_fixed",
+    ])
+    return df.rename(columns={"article_id_fixed": "history"})
+
+
+def load_publish_times(*articles_paths: Path) -> pd.DataFrame:
+    """article_id -> published_time, unioned across splits (mirrors load_articles)."""
+    frames = [pd.read_parquet(p, columns=["article_id", "published_time"]) for p in articles_paths]
+    out = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["article_id"], keep="first")
+    out["article_id"] = out["article_id"].astype(int)
+    return out.reset_index(drop=True)
+
+
+def load_session_ids(behaviors_path: Path) -> pd.DataFrame:
+    """impression_id -> session_id only. MIND has no session concept (see features.py,
+    which buckets MIND sessions from timestamp gaps instead)."""
+    return pd.read_parquet(behaviors_path, columns=["impression_id", "session_id"])
+
+
 def _attach_labels_and_history(behaviors: pd.DataFrame, history: pd.DataFrame, has_labels: bool) -> pd.DataFrame:
     # IMPORTANT: do NOT merge the full history list onto every behavior row -- a user's
     # history is constant within a split but repeats across ~15 impressions on average,

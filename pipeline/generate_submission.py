@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import gc
 import time
-from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -33,20 +32,11 @@ from pipeline.adapters import ebnerd as ebnerd_adapter
 from pipeline.adapters import mind as mind_adapter
 from pipeline.common.bm25 import BM25Index
 from pipeline.common.embeddings import EmbeddingIndex
+from pipeline.common.popularity import train_popularity as _train_popularity
 from pipeline.common.submission import format_line, hybrid_score, scores_to_ranks, write_submission_zip
 
 HISTORY_WINDOW = 50
 SUBBATCH_SIZE = 20_000  # see _score_chunk_subbatched: bounds the BM25 query-string list's memory
-
-
-def _train_popularity(fs: Path) -> dict:
-    train = pd.read_parquet(fs / "behaviors_train.parquet", columns=["candidates", "labels"])
-    counter = Counter()
-    for cands, labels in zip(train["candidates"], train["labels"]):
-        for c, l in zip(cands, labels):
-            if l == 1:
-                counter[c] += 1
-    return dict(counter)
 
 
 def _score_chunk(chunk_histories: list[list], candidates: list[list], bm25: BM25Index,

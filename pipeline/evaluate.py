@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections import Counter
 
 import numpy as np
 import pandas as pd
@@ -27,19 +26,10 @@ import pandas as pd
 from pipeline import config
 from pipeline.common.embeddings import EmbeddingIndex
 from pipeline.common.metrics import coverage, evaluate_impressions, intra_list_diversity, novelty, summarize
+from pipeline.common.popularity import train_popularity as _train_popularity
 
 COLD_START_THRESHOLD = 5   # history_len <= this => cold-start (assignment's own example threshold)
 HEAD_FRACTION = 0.2        # top 20% most-clicked (in TRAIN) articles = "head"
-
-
-def _train_popularity(fs) -> dict:
-    train = pd.read_parquet(fs / "behaviors_train.parquet", columns=["candidates", "labels"])
-    counter = Counter()
-    for cands, labels in zip(train["candidates"], train["labels"]):
-        for c, l in zip(cands, labels):
-            if l == 1:
-                counter[c] += 1
-    return dict(counter)
 
 
 def _head_tail_mask(clicked_ids: list, popularity: dict, head_frac: float) -> np.ndarray:

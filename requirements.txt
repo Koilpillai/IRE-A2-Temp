@@ -1,11 +1,16 @@
-# Core (pinned to what this pipeline was built and run against)
-pandas==2.1.4
-numpy==1.26.4
-scipy==1.11.4
-scikit-learn==1.2.2
-gensim==4.3.0
-pyarrow==14.0.2
-pytest==7.4.0
+# Core. Originally pinned to numpy==1.26.4/pandas==2.1.4 etc, but those predate
+# Python 3.13 wheel support (numpy<2.0 has no 3.13 wheel and fails to build from
+# source without a GCC>=8.4 toolchain) -- unpinned to whatever resolves cleanly
+# on 3.13 instead of fighting the toolchain. Known-good versions on Python 3.13.2:
+# pandas==3.0.5, numpy==2.5.3, scipy==1.18.1, scikit-learn==1.9.1, gensim==4.4.0,
+# pyarrow==25.0.1.
+pandas
+numpy
+scipy
+scikit-learn
+gensim
+pyarrow
+pytest
 
 # Optional, auto-detected at import time (see pipeline/common/embeddings.py) --
 # not required to run anything below, but used automatically if present:
