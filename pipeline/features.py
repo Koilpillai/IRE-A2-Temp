@@ -88,7 +88,10 @@ def _rank_decay_weights(n: int, decay: float) -> np.ndarray:
 def _time_decay_weights(item_times: np.ndarray, ref_time, half_life_hours: float) -> np.ndarray:
     if len(item_times) == 0:
         return np.zeros(0, dtype=np.float64)
-    delta_hours = (ref_time - item_times) / np.timedelta64(1, "h")
+    # np.datetime64(...) explicitly, not the bare pd.Timestamp -- numpy 2.x's ufunc
+    # dispatch no longer auto-converts a Timestamp scalar against a datetime64 array
+    # (raises _UFuncBinaryResolutionError on dtype('O') vs dtype('<M8[us]')).
+    delta_hours = (np.datetime64(ref_time) - item_times) / np.timedelta64(1, "h")
     delta_hours = np.clip(delta_hours.astype(np.float64), 0.0, None)
     return 0.5 ** (delta_hours / half_life_hours)
 
@@ -99,6 +102,14 @@ def _weighted_mean_vec(rows: list[int], weights: np.ndarray, article_vecs: np.nd
         return np.zeros(dim, dtype=np.float32)
     w = weights[:len(rows)]
     return (article_vecs[rows] * w[:, None]).sum(axis=0) / w.sum()
+
+
+def _safe_nanmean(arr: np.ndarray) -> float:
+    """np.nanmean, but 0.0 (not NaN + a RuntimeWarning) for empty/all-NaN input --
+    EB-NeRD's read_time_fixed/scroll_percentage_fixed do contain per-item NaNs."""
+    if len(arr) == 0 or np.all(np.isnan(arr)):
+        return 0.0
+    return float(np.nanmean(arr))
 
 
 def _cosine(a: np.ndarray | None, b: np.ndarray) -> float:
@@ -241,8 +252,8 @@ def build_features(dataset: str, split: str, sample: int | None = None) -> Path:
                 window_times = times_full[-config.FEATURE_HISTORY_WINDOW:]
                 weights_full = _time_decay_weights(window_times, ref_time, config.HIST_HALF_LIFE_HOURS)
                 hist_len = int(len(ids_full))
-                avg_read = float(np.nanmean(reads_full)) if len(reads_full) else 0.0
-                avg_scroll = float(np.nanmean(scrolls_full)) if len(scrolls_full) else 0.0
+                avg_read = _safe_nanmean(reads_full)
+                avg_scroll = _safe_nanmean(scrolls_full)
             else:
                 hist_ids = history_by_user.get(user_id)
                 hist_ids = list(hist_ids) if hist_ids is not None and len(hist_ids) else []
@@ -301,7 +312,12 @@ def build_features(dataset: str, split: str, sample: int | None = None) -> Path:
         chunk_df = pd.DataFrame(rows)
         table = pa.Table.from_pandas(chunk_df, preserve_index=False)
         if writer is None:
-            writer = pq.ParquetWriter(out_path, table.schema)
+            # use_dictionary=False: each chunk's pa.Table.from_pandas() otherwise
+            # dictionary-encodes string columns (MIND's candidate_id/user_id) with
+            # its own per-chunk dictionary, and reading the resulting multi-row-group
+            # file back raises "Column cannot have more than one dictionary" on this
+            # pyarrow version. Plain (non-dictionary) encoding sidesteps it entirely.
+            writer = pq.ParquetWriter(out_path, table.schema, use_dictionary=False)
         writer.write_table(table)
         n_rows += len(chunk_df)
         print(f"[{dataset}/{split}] features: {n_rows:,}/-  rows written "
