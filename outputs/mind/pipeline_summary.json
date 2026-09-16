@@ -1,0 +1,18 @@
+{
+  "dataset": "mind",
+  "n_articles": 125590,
+  "n_train": 156965,
+  "n_train_fit": 133422,
+  "n_train_tune": 23543,
+  "n_val": 73152,
+  "train_time_range": [
+    "2019-11-09 00:00:19",
+    "2019-11-14 23:59:13"
+  ],
+  "internal_tune_cutoff": "2019-11-14 07:28:44",
+  "val_time_range": [
+    "2019-11-15 00:00:01",
+    "2019-11-15 23:58:03"
+  ],
+  "build_seconds": 13.7
+}

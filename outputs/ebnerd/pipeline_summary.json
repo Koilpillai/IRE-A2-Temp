@@ -1,0 +1,18 @@
+{
+  "dataset": "ebnerd",
+  "n_articles": 125541,
+  "n_train": 232887,
+  "n_train_fit": 197955,
+  "n_train_tune": 34932,
+  "n_val": 244647,
+  "train_time_range": [
+    "2023-05-18 07:00:01",
+    "2023-05-25 06:59:58"
+  ],
+  "internal_tune_cutoff": "2023-05-24 05:47:36",
+  "val_time_range": [
+    "2023-05-25 07:00:02",
+    "2023-06-01 06:59:59"
+  ],
+  "build_seconds": 5.7
+}
