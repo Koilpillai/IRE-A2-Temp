@@ -1,0 +1,60 @@
+{
+  "dataset": "mind",
+  "index_memory": {
+    "bm25_index": {
+      "matrix_bytes": 25930364,
+      "matrix_mb": 25.930364,
+      "vocab_terms": 49986,
+      "n_docs": 125590
+    },
+    "embedding_index": {
+      "dense_matrix_bytes": 64302080,
+      "dense_matrix_mb": 64.30208,
+      "ann_backend": "ivf_from_scratch",
+      "ann_index_bytes": 1135792,
+      "ann_index_mb": 1.135792,
+      "dim": 128,
+      "n_docs": 125590
+    },
+    "reranker_model": {
+      "pickle_bytes": 1019095,
+      "pickle_mb": 1.019095
+    },
+    "feature_store_on_disk": {
+      "bytes": 446274872,
+      "mb": 446.274872,
+      "n_files": 12
+    },
+    "total_serving_memory_mb": 92.387331,
+    "process_peak_rss_mb": 620.016
+  },
+  "latency": {
+    "n_trials": 500,
+    "mean_ms": 333.02034405598533,
+    "p50_ms": 227.0644514937885,
+    "p95_ms": 711.1835327494189,
+    "p99_ms": 1180.334503948979,
+    "max_ms": 1618.4863600065,
+    "min_ms": 48.09282399946824
+  },
+  "cost_qps": {
+    "assumptions": {
+      "hourly_cpu_cost_usd": 0.05,
+      "target_sla_p99_ms": 100.0,
+      "target_sustained_qps": 1000.0,
+      "single_request_at_a_time_per_core": true
+    },
+    "qps_per_core": 3.0028195509637876,
+    "cost_per_1000_queries_usd": 0.00462528255633313,
+    "p99_meets_sla_single_core": false,
+    "cores_needed_to_sustain_target_qps": 334
+  },
+  "scaling_argument_10x": {
+    "summary": "Horizontal replication (stateless, read-only indices) absorbs a 10x QPS increase at roughly fixed per-request latency, as long as corpus size is fixed -- each replica just needs its own full index copy. The first thing to break under a SIMULTANEOUS 10x QPS + 10x corpus-size increase is per-replica index memory (this sandbox's own IVF ANN fallback, used because faiss was not installable here, is the specific compute bottleneck at that scale, since it loops per-query in Python rather than batching like FAISS's C++ implementation does). GBDT reranking batches cheaply and is not expected to be the limiting stage. See this module's own docstring for the full reasoning this summary is drawn from.",
+    "measured_inputs_used": {
+      "total_serving_memory_mb": 92.387331,
+      "ann_backend": "ivf_from_scratch",
+      "p99_latency_ms": 1180.334503948979
+    }
+  }
+}

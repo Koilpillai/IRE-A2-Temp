@@ -1,4 +1,4 @@
-.PHONY: data retrieve evaluate submit test all clean
+.PHONY: data retrieve evaluate rerank ablation serving_scale submit test all clean
 
 # One-command rebuild, per Q1.5. Each target is also runnable standalone with
 # `--dataset mind` or `--dataset ebnerd` (see README.md) -- `all` runs both
@@ -14,6 +14,14 @@ retrieve:
 evaluate:
 	python3 -m pipeline.evaluate --dataset all
 
+rerank:
+	python3 -m pipeline.features --dataset all
+	python3 -m pipeline.rerank --dataset all
+	python3 -m pipeline.ablation --dataset all
+
+serving_scale:
+	python3 -m pipeline.serving_scale --dataset all
+
 submit:
 	python3 -m pipeline.generate_submission --dataset mind
 	python3 -m pipeline.generate_submission --dataset ebnerd
@@ -21,7 +29,7 @@ submit:
 test:
 	python3 -m pytest pipeline/tests/ -v
 
-all: data retrieve evaluate test submit
+all: data retrieve evaluate rerank serving_scale test submit
 
 clean:
 	rm -rf feature_store/mind/* feature_store/ebnerd/*

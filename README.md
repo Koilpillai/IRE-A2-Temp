@@ -140,3 +140,54 @@ clicking submit needs an account, so that part is still a manual step.
 
 Raw datasets, `feature_store/`, and `outputs/` are all things `make all` regenerates,
 so they're left out via `.gitignore`, per Q8's "no large files in git" rule.
+
+## Assignment 2: learning from click-logs
+
+Builds on the A1 pipeline above -- same feature store, same BM25/embedding indices,
+same eval harness. A2's own modules are self-labeled in their own docstrings (`A2 Q1`,
+`A2 Q2`, ...) since A1's Q-numbers above are already taken:
+
+```
+pipeline/
+  features.py         A2 Q1 -- click-history & session behavioural features
+  common/reranker.py  A2 Q1/Q2 shared GBDT train/predict helpers
+  rerank.py            A2 Q2 -- two-stage retrieve-then-rank: GBDT reranker over Q1's features
+  ablation.py           A2 Q3 -- baseline reproduced, then beaten; paired bootstrap CI
+  serving_scale.py      A2 Q4 -- serving & scale analysis (index memory, p99 latency, cost/QPS, 10x scaling)
+```
+
+```bash
+make rerank          # A2 Q1+Q2+Q3: features -> GBDT reranker -> baseline-vs-improved ablation
+make serving_scale    # A2 Q4: index memory, p99 latency, cost/QPS, 10x scaling argument
+```
+
+Both are also runnable standalone per dataset, same `--dataset mind`/`--dataset ebnerd`
+convention as A1 (e.g. `python -m pipeline.serving_scale --dataset mind --n_trials 200`
+for a quick smoke test before the full 500-trial run).
+
+**Q4 -- serving & scale analysis** (`pipeline/serving_scale.py`) reuses the exact
+BM25/embedding/GBDT artifacts Q1-Q3 already built and persisted to
+`feature_store/<dataset>/` -- it measures the actual pipeline, not a synthetic stand-in:
+
+- **Index memory**: exact `.nbytes`/pickle-size accounting for the BM25 sparse
+  term-weight matrix, the dense Word2Vec embedding matrix, the ANN index (FAISS HNSW
+  or the from-scratch IVF fallback -- whichever actually built, see
+  `pipeline/common/embeddings.py`), the GBDT reranker, and the on-disk feature store;
+  cross-checked against the process's own peak RSS (`resource.getrusage`, stdlib).
+- **Latency**: p50/p95/p99 wall-clock for a simulated single-user request (candidate
+  generation from BM25 + embedding top-K, union, then GBDT rerank), timed one request
+  at a time -- no batching credited, since that's what one incoming request actually
+  looks like.
+- **Cost/QPS**: a back-of-envelope single-core-throughput estimate (queries/sec = 1 /
+  mean single-request latency) against an assumed hourly cloud-CPU price, plus how many
+  parallel replicas a p99 < 100ms SLA at 1000 queries would need.
+- **10x scaling argument**: written out in the module's own docstring and saved into
+  `outputs/<dataset>/serving_scale.json` -- horizontal replication (indices are
+  read-only and requests are independent) absorbs a 10x QPS increase at roughly fixed
+  per-request latency as long as corpus size stays fixed; the first thing to break
+  under a simultaneous 10x QPS **and** 10x corpus-size increase is per-replica index
+  memory, with the from-scratch IVF ANN fallback's per-query Python loop (used here
+  because `faiss` wasn't installable in this sandbox) as the specific compute
+  bottleneck at that scale, ahead of GBDT reranking or BM25 scoring.
+
+Output: `outputs/<dataset>/serving_scale.json`.
