@@ -2,6 +2,8 @@
 **CS4.406: Information Retrieval & Extraction — Assignment 2 Report**
 
 ---
+Github Link: https://github.com/Koilpillai/IRE-A2-Temp
+---
 
 ## Executive Summary
 
@@ -215,14 +217,3 @@ All temporal boundaries and feature extraction invariants are systematically enf
    - `test_features_empty_history_is_neutral`: Ensures cold-start users receive neutral feature values (0.0 similarity and 0.0 category overlap) rather than leaked defaults.
 
 **Test Suite Status**: 20 tests passed, 2 skipped (expected empty-sample guards).
-
----
-
-## Deliverables & Submission Status (Q7)
-
-- [x] **End-to-End Pipeline**: Fully reproducible code for feature extraction, GBDT re-ranking, ablation testing, and scale evaluation (`Makefile`, `pipeline/`).
-- [x] **Unit Testing Harness**: Rigorous anti-leakage test suite (`pipeline/tests/test_no_leakage.py`).
-- [x] **Codabench Submission Files**: Formatted and validated archives for MIND (`prediction.zip`) and EB-NeRD (`predictions.zip`).
-- [ ] **Leaderboard Upload & Screenshots**: Final submission via the Codabench web portal to capture official leaderboard confirmation screenshots.
-- [ ] **Design Note Document**: Formatting the experimental findings and architectural analysis into the required 6-page PDF format (Q6).
-- [ ] **AI Usage Log**: Final compilation of query logs and code attribution records (Q7.4).
