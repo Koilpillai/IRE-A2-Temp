@@ -217,3 +217,9 @@ All temporal boundaries and feature extraction invariants are systematically enf
    - `test_features_empty_history_is_neutral`: Ensures cold-start users receive neutral feature values (0.0 similarity and 0.0 category overlap) rather than leaked defaults.
 
 **Test Suite Status**: 20 tests passed, 2 skipped (expected empty-sample guards).
+
+### Screenshots of submissions : 
+- MIND:
+![alt text](mind.png)
+- EB-NeRD:
+![alt text](ebnerd.png)
