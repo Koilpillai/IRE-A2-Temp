@@ -13,9 +13,9 @@ Option A (GBDT) vs Option B (a neural ranker, e.g. NRMS) per Q2.2: Option B need
 `torch`, and A1's README already documents that `torch` couldn't be installed in the
 original dev sandbox. It's installable here (see requirements.txt / the design note),
 but re-deriving NRMS's user/news encoders from scratch is a much larger undertaking
-than this assignment's Q2 scope calls for, so GBDT (scikit-learn's
-HistGradientBoostingClassifier -- same algorithm family as LightGBM/XGBoost) is the
-one actually implemented; see pipeline/common/reranker.py.
+than this assignment's Q2 scope calls for, so GBDT (XGBoost's histogram GBDT, trained
+on the GPU when CUDA is available) is the one actually implemented; see
+pipeline/common/reranker.py.
 
 "Before" reranking (Q2.4) = A1's own fused BM25+embedding retrieval score on the
 EXACT SAME candidate rows the GBDT scores -- since `candidate_position` is already
@@ -47,7 +47,9 @@ import pandas as pd
 
 from pipeline import config
 from pipeline.common.metrics import evaluate_impressions, summarize
-from pipeline.common.reranker import feature_columns, group_by_impression, load_features, to_xy, train_gbdt
+from pipeline.common.reranker import (
+    GBDT_DEVICE, feature_columns, group_by_impression, load_features, n_boosting_rounds, to_xy, train_gbdt,
+)
 
 
 def run(dataset: str) -> dict:
@@ -66,8 +68,8 @@ def run(dataset: str) -> dict:
 
     t0 = time.time()
     model = train_gbdt(X_train, y_train, seed=config.RANDOM_SEED)
-    print(f"[{dataset}] GBDT trained in {time.time()-t0:.1f}s "
-          f"(n_iter={model.n_iter_}, train clickthrough rate={y_train.mean():.4f})")
+    print(f"[{dataset}] GBDT trained on {GBDT_DEVICE} in {time.time()-t0:.1f}s "
+          f"(n_iter={n_boosting_rounds(model)}, train clickthrough rate={y_train.mean():.4f})")
 
     val_df = val_df.copy()
     val_df["gbdt_score"] = model.predict_proba(X_val)[:, 1]
@@ -97,7 +99,8 @@ def run(dataset: str) -> dict:
     embed_scores_all = [np.asarray(s) for s in retrieval_official["embed_scores"]]
 
     report = {"dataset": dataset, "n_train_rows": len(train_df), "n_val_rows": len(val_df),
-              "feature_columns": feat_cols, "gbdt_n_iter": int(model.n_iter_)}
+              "feature_columns": feat_cols, "gbdt_n_iter": n_boosting_rounds(model),
+              "gbdt_device": GBDT_DEVICE}
     for name, labels, scores in [
         ("retrieval_before", retrieval_labels, retrieval_scores),
         ("gbdt_after", gbdt_labels, gbdt_scores),

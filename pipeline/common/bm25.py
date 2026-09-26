@@ -1,10 +1,14 @@
 """BM25 lexical retrieval: inverted index + vectorized scoring.
 
-Everything is expressed as sparse-matrix algebra (scipy.sparse, CPU/BLAS-backed) so it
-scales to the 13.5M-row EB-NeRD test set and 2.37M-row MIND test set without a
-Python-level loop per impression. See README / design note for why this stays on CPU
-(sparse ops) while embedding similarity moves to GPU (dense ops) -- they suit different
-hardware.
+Everything is expressed as sparse-matrix algebra so it scales to the 13.5M-row EB-NeRD
+test set and 2.37M-row MIND test set without a Python-level loop per impression.
+
+Scoring runs on the GPU when CUDA is available: the (n_docs x vocab) BM25 weight matrix
+lives on-device as a sparse CSR tensor, each query batch is densified on-device, and
+scores = W @ Q^T is a cuSPARSE sparse x dense matmul followed by torch.topk (full-corpus
+retrieval) or a gather over the given candidate rows (candidate scoring). Tokenization
+(CountVectorizer.transform) is string processing and stays on CPU. Without CUDA, the
+original scipy.sparse CPU path below is used unchanged.
 """
 from __future__ import annotations
 
@@ -12,7 +16,10 @@ import numpy as np
 import scipy.sparse as sp
 from sklearn.feature_extraction.text import CountVectorizer
 
+from .embeddings import DEVICE, torch
 from .text import tokenize
+
+_GPU_BATCH_SIZE = 1024  # (n_docs x batch) float32 score block: ~0.5GB at ~125K docs
 
 
 class BM25Index:
@@ -22,6 +29,7 @@ class BM25Index:
         self.min_df = min_df
         self.vectorizer: CountVectorizer | None = None
         self.W: sp.csr_matrix | None = None  # (n_docs, vocab) BM25-weighted matrix
+        self.W_t = None  # same matrix as a CUDA sparse CSR tensor, when a GPU is available
         self.doc_ids: list = []
         self._id_to_row: dict = {}
 
@@ -49,12 +57,26 @@ class BM25Index:
 
         w_data = idf[X.indices] * (tf * (self.k1 + 1)) / (tf + len_norm[row_idx])
         self.W = sp.csr_matrix((w_data, X.indices, X.indptr), shape=X.shape)
+        if DEVICE == "cuda":
+            self.W_t = torch.sparse_csr_tensor(
+                torch.from_numpy(self.W.indptr.astype(np.int64)),
+                torch.from_numpy(self.W.indices.astype(np.int64)),
+                torch.from_numpy(self.W.data.astype(np.float32)),
+                size=self.W.shape, device="cuda")
         return self
 
     def _query_matrix(self, texts: list[str]) -> sp.csr_matrix:
         Q = self.vectorizer.transform(texts).tocsr()
         Q.data = Q.data.astype(np.float32)
         return Q
+
+    def _gpu_scores(self, texts: list[str]):
+        """(len(texts) x n_docs) BM25 score block, computed on the GPU."""
+        Q = self._query_matrix(texts)
+        Q_t = torch.sparse_csr_tensor(
+            torch.from_numpy(Q.indptr.astype(np.int64)), torch.from_numpy(Q.indices.astype(np.int64)),
+            torch.from_numpy(Q.data), size=Q.shape, device="cuda").to_dense()
+        return (self.W_t @ Q_t.T).T  # (n_docs, vocab) @ (vocab, b) -> transposed to (b, n_docs)
 
     def top_k_batch(self, query_texts: list[str], k: int, batch_size: int = 100) -> list[list]:
         """Full-corpus top-K retrieval per query. Used for Q2 recall@K.
@@ -66,6 +88,14 @@ class BM25Index:
         import gc
         results: list[list] = []
         n = len(query_texts)
+        if self.W_t is not None:
+            for start in range(0, n, _GPU_BATCH_SIZE):
+                scores = self._gpu_scores(query_texts[start:start + _GPU_BATCH_SIZE])
+                _, top_idx = torch.topk(scores, min(k, scores.shape[1]), dim=1)
+                for row in top_idx.cpu().numpy():
+                    results.append([self.doc_ids[i] for i in row])
+                del scores, top_idx
+            return results
         for start in range(0, n, batch_size):
             chunk = query_texts[start:start + batch_size]
             Q = self._query_matrix(chunk)                    # (b, vocab)
@@ -98,6 +128,27 @@ class BM25Index:
         """
         n = len(candidate_id_lists)
         out: list[np.ndarray] = [np.zeros(0) for _ in range(n)]
+        if self.W_t is not None:
+            # GPU: score the whole corpus for a query batch in one sparse x dense matmul,
+            # then gather each query's own candidate columns (unknown ids score 0, same
+            # as the CPU path).
+            for start in range(0, n, _GPU_BATCH_SIZE):
+                end = min(start + _GPU_BATCH_SIZE, n)
+                lists = candidate_id_lists[start:end]
+                max_len = max((len(c) for c in lists), default=0)
+                if max_len == 0:
+                    continue
+                cand_rows = np.full((end - start, max_len), -1, dtype=np.int64)
+                for i, cands in enumerate(lists):
+                    cand_rows[i, :len(cands)] = [self._id_to_row.get(c, -1) for c in cands]
+                scores = self._gpu_scores(query_texts[start:end])
+                rows_t = torch.from_numpy(cand_rows).to("cuda")
+                gathered = torch.gather(scores, 1, rows_t.clamp(min=0))
+                gathered = torch.where(rows_t >= 0, gathered, torch.zeros_like(gathered)).cpu().numpy()
+                for i, cands in enumerate(lists):
+                    out[start + i] = gathered[i, :len(cands)].astype(np.float64)
+                del scores, rows_t
+            return out
         for start in range(0, n, chunk_size):
             end = min(start + chunk_size, n)
             Q = self._query_matrix(query_texts[start:end])  # (b, vocab), b small

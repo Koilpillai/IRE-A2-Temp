@@ -10,8 +10,9 @@ production, not a synthetic stand-in.
      fallback -- see pipeline/common/embeddings.py), the GBDT reranker model, and the
      on-disk feature store. Reported two ways: exact `.nbytes`/pickle-size accounting
      for each concrete object (deterministic, not GC-timing-dependent), and the
-     process's own peak RSS (`resource.getrusage`, stdlib -- no psutil dependency) as a
-     cross-check that includes Python/library overhead the object-level count misses.
+     process's own peak RSS (`_peak_rss_kb` below -- stdlib only, no psutil dependency;
+     `resource.getrusage` on Unix, Win32 `GetProcessMemoryInfo` via ctypes on Windows)
+     as a cross-check that includes Python/library overhead the object-level count misses.
   2. Latency (Q4.2): one simulated single-user request = build a query from that user's
      history -> BM25 top-K candidate generation -> embedding top-K candidate generation
      -> GBDT rerank over the union. Timed for N_TRIALS real validation users, single
@@ -36,42 +37,44 @@ rebuild a separate one.
 
 --- Q4.4: scaling argument (10x current load) ---
 
-This machine has 20 CPU cores and ~7.6GB RAM (see README's "why some of this looks the
-way it does"). At the traffic this pipeline was actually measured at (one process,
-single-request-at-a-time, no batching), the numbers below identify the first thing to
-break as load grows 10x:
+This machine has a single GPU (RTX 4050, 6GB VRAM) alongside its CPU cores. Embedding
+retrieval (pipeline/common/embeddings.py's EmbeddingIndex.top_k_batch) runs exact
+brute-force search on that GPU when CUDA is available, in preference to any CPU ANN
+index (FAISS/from-scratch IVF) -- see that module's docstring. This changes the Q4.4
+bottleneck story from a CPU-Python-loop problem to a GPU-capacity problem:
 
   - Candidate generation is embarrassingly parallel across requests (each query is
     independent, both indices are read-only once built) -- horizontal scaling by adding
-    more stateless worker processes/replicas behind a load balancer covers a 10x QPS
-    increase with roughly the same per-request latency, PROVIDED each replica can hold
-    its own full copy of the index in memory.
-  - That "provided" is exactly what breaks first: index memory is fixed per replica
-    (one BM25 matrix + one embedding/ANN index + one GBDT model, all loaded once at
-    startup), so 10x QPS via naive replication means 10x the total index-memory
-    footprint across the fleet. On a MIND/EB-NeRD-small-scale corpus (~50-125K
-    articles) this is a non-issue on any reasonable cloud instance; it stops being a
-    non-issue at 10x the CORPUS size (the assignment's "large" bundles: EB-NeRD's full
-    catalog and MIND-large), where the dense embedding matrix and BM25 vocab both grow
-    roughly linearly and a brute-force fallback (this sandbox's own IVF index exists
-    precisely because faiss wasn't installable here) stops fitting comfortably in a
-    single replica's RAM.
-  - The from-scratch IVF index (used here in place of FAISS) is also the first
-    COMPUTE bottleneck at 10x QPS on a fixed replica count: its `.search()' loops over
-    query rows in Python (see IVFIndex.search in pipeline/common/embeddings.py),
-    unlike FAISS's batched C++ implementation, so its per-query cost doesn't amortize
-    across a batch the way BM25's sparse-matmul batching does. A real FAISS index
-     (installable outside this sandbox's network-restricted environment) removes this
-    specific bottleneck without any other architecture change.
+    more stateless worker replicas behind a load balancer covers a 10x QPS increase with
+    roughly the same per-request latency, PROVIDED each replica can hold its own copy of
+    the serving state.
+  - On CPU-only replicas (BM25's sparse matrix, the GBDT model, the feature store),
+    that "provided" is a non-issue at MIND/EB-NeRD-small scale (~50-125K articles) on
+    any reasonable cloud instance, and stays roughly linear-and-affordable even at 10x
+    the CORPUS size (the assignment's "large" bundles).
+  - The GPU-resident embedding matrix is a different story: unlike CPU RAM (cheap,
+    horizontally trivial), each replica needs its OWN GPU with enough VRAM to hold the
+    corpus matrix, and GPUs are both scarcer and far more expensive per unit than CPU
+    cores in most cloud fleets. At the current corpus size the resident matrix is tiny
+    (see gpu_resident_matrix_mb below, well under 1GB), so a single mid-range GPU could
+    still serve 10x the QPS via batching multiple concurrent requests' queries into one
+    GPU call (which this repo's single-request-at-a-time benchmark deliberately does
+    NOT exploit -- see measure_latency). The real ceiling is a SIMULTANEOUS 10x corpus
+    increase (EB-NeRD's full catalog / MIND-large): the resident matrix and any
+    GPU-side batch buffers grow roughly linearly with corpus size, and eventually stop
+    fitting in a 6GB-class card, forcing either a bigger GPU per replica (cost) or a
+    return to a CPU ANN fallback (the from-scratch IVF index already implemented here
+    for exactly that no-GPU/insufficient-VRAM case) for the corpus tail that doesn't fit.
   - GBDT reranking itself is comparatively cheap (see measured latency breakdown
-    below) and batches trivially (`predict_proba` over many candidate rows at once),
-    so it is not expected to be the first thing to break.
-  - Net scaling argument: horizontal replication handles a 10x QPS increase cleanly as
-    long as corpus size stays fixed; a simultaneous 10x QPS AND 10x corpus increase
-    (i.e. moving to the assignment's large bundles under load) would first strain
-    per-replica index memory, and would make a from-scratch IVF fallback's
-    per-query Python loop the compute bottleneck before GBDT reranking or BM25 scoring
-    become limiting.
+    below), stays on CPU (scikit-learn has no GPU path), and batches trivially
+    (`predict_proba` over many candidate rows at once) -- not expected to be the first
+    thing to break either way.
+  - Net scaling argument: horizontal replication handles a 10x QPS increase cleanly at
+    the current corpus size (GPU VRAM headroom is large relative to the corpus, and
+    unlike the old CPU-IVF path, per-query cost is no longer a Python-loop bottleneck).
+    A simultaneous 10x QPS AND 10x corpus-size increase is what actually strains a fixed
+    per-replica GPU budget -- GPU VRAM capacity (not CPU compute) becomes the first
+    thing to break, since GPUs don't scale out as cheaply as CPU cores do.
 """
 from __future__ import annotations
 
@@ -79,7 +82,7 @@ import argparse
 import io
 import json
 import pickle
-import resource
+import sys
 import time
 from pathlib import Path
 
@@ -90,6 +93,48 @@ import pandas as pd
 from pipeline import config
 from pipeline.common.bm25 import BM25Index
 from pipeline.common.embeddings import EmbeddingIndex
+
+try:
+    import resource  # Unix only
+except ImportError:
+    resource = None
+
+
+def _peak_rss_kb() -> float:
+    """Peak resident set size in KB, cross-platform, stdlib-only (no psutil).
+
+    `resource.getrusage` (Unix) isn't available on Windows at all -- this repo has
+    run on both a Linux dev sandbox and this Windows machine, so this can't assume
+    either. Falls back to the Win32 GetProcessMemoryInfo API via ctypes (still
+    stdlib, no new dependency) on Windows; returns NaN if neither is available."""
+    if resource is not None:
+        return float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    if sys.platform == "win32":
+        import ctypes
+        import ctypes.wintypes as wintypes
+
+        class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        # ctypes defaults to a 32-bit c_int return/arg type, which truncates/corrupts
+        # the (pointer-sized) HANDLE on 64-bit Windows unless declared explicitly --
+        # without this, GetCurrentProcess()'s pseudo-handle round-trips incorrectly
+        # and GetProcessMemoryInfo fails with ERROR_INVALID_HANDLE.
+        ctypes.windll.kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        ctypes.windll.psapi.GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(PROCESS_MEMORY_COUNTERS), wintypes.DWORD]
+        counters = PROCESS_MEMORY_COUNTERS()
+        counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+        handle = ctypes.windll.kernel32.GetCurrentProcess()
+        if ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+            return float(counters.PeakWorkingSetSize) / 1024.0  # bytes -> KB, matches ru_maxrss's unit
+    return float("nan")
 
 HISTORY_WINDOW = 50  # same convention as Q2/Q3/Q5's query construction
 RERANK_TOP_K = 200   # candidates actually sent to the GBDT stage (Q2's K~100-200)
@@ -117,7 +162,16 @@ def measure_index_memory(fs: Path, bm25: BM25Index, emb: EmbeddingIndex, reranke
     bm25_vocab_terms = len(bm25.vectorizer.vocabulary_)
 
     embed_matrix_bytes = int(emb.mat_np.nbytes)
-    if emb.faiss_index is not None:
+    if emb.device == "cuda" and emb.ann_index is None:
+        # top_k_batch runs exact GPU brute-force search here (see embeddings.py) --
+        # no separate CPU ANN index is built at all (see EmbeddingIndex.__init__), so
+        # there's no ann_index_bytes to report. The GPU-resident copy of the corpus
+        # matrix (emb.mat_t, same shape/dtype as mat_np) is the actual serving cost
+        # instead, reported separately since it lives in VRAM, not process RSS/RAM.
+        ann_backend = "gpu_exact_bruteforce"
+        ann_index_bytes = 0
+        gpu_matrix_bytes = embed_matrix_bytes  # mat_t mirrors mat_np's shape/dtype on-device
+    elif emb.faiss_index is not None:
         ann_backend = "faiss_hnsw"
         # faiss has no public in-memory size API on the numpy-only sandbox path
         # (never exercised here -- this run's own network was down and faiss wasn't
@@ -126,27 +180,37 @@ def measure_index_memory(fs: Path, bm25: BM25Index, emb: EmbeddingIndex, reranke
         # x ~2 levels average x int32 id).
         n, d = emb.mat_np.shape
         ann_index_bytes = int(n * d * 4 + n * 32 * 2 * 4)
+        gpu_matrix_bytes = 0
     else:
         ivf = emb.ann_index
         ann_backend = "ivf_from_scratch"
         centroid_bytes = ivf._centroids.nbytes
         cluster_id_bytes = sum(arr.nbytes for arr in ivf._clusters.values())
         ann_index_bytes = int(centroid_bytes + cluster_id_bytes)
+        gpu_matrix_bytes = 0
 
     reranker_bytes = reranker_path.stat().st_size if reranker_path.exists() else 0
 
     feature_store_files = sorted(fs.glob("*"))
     feature_store_bytes = int(sum(p.stat().st_size for p in feature_store_files if p.is_file()))
 
+    # total_serving_memory_mb stays a HOST-RAM figure: embed_matrix_bytes is emb.mat_np,
+    # the CPU-resident copy that always exists regardless of device (see
+    # EmbeddingIndex.__init__), so it's already counted correctly whether or not a GPU
+    # is in play. gpu_matrix_bytes (the separate on-device VRAM copy, emb.mat_t) is
+    # reported alongside but deliberately NOT summed in here -- it's a different
+    # resource pool with its own (much smaller, ~6GB-class) capacity ceiling.
     total_serving_bytes = bm25_matrix_bytes + embed_matrix_bytes + ann_index_bytes + reranker_bytes
-    rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # Linux: KB (peak, whole process so far)
+    rss_kb = _peak_rss_kb()  # cross-platform (Unix resource.getrusage or Windows GetProcessMemoryInfo), KB
 
     return {
         "bm25_index": {"matrix_bytes": bm25_matrix_bytes, "matrix_mb": bm25_matrix_bytes / 1e6,
                         "vocab_terms": bm25_vocab_terms, "n_docs": len(bm25.doc_ids)},
         "embedding_index": {"dense_matrix_bytes": embed_matrix_bytes, "dense_matrix_mb": embed_matrix_bytes / 1e6,
                              "ann_backend": ann_backend, "ann_index_bytes": ann_index_bytes,
-                             "ann_index_mb": ann_index_bytes / 1e6, "dim": emb.dim, "n_docs": len(emb.doc_ids)},
+                             "ann_index_mb": ann_index_bytes / 1e6,
+                             "gpu_resident_matrix_bytes": gpu_matrix_bytes, "gpu_resident_matrix_mb": gpu_matrix_bytes / 1e6,
+                             "dim": emb.dim, "n_docs": len(emb.doc_ids)},
         "reranker_model": {"pickle_bytes": reranker_bytes, "pickle_mb": reranker_bytes / 1e6},
         "feature_store_on_disk": {"bytes": feature_store_bytes, "mb": feature_store_bytes / 1e6,
                                    "n_files": len(feature_store_files)},
@@ -329,9 +393,10 @@ def run(dataset: str, n_trials: int, seed: int) -> dict:
     print(f"[{dataset}] index memory: BM25={mem_report['bm25_index']['matrix_mb']:.1f}MB  "
           f"embeddings={mem_report['embedding_index']['dense_matrix_mb']:.1f}MB  "
           f"ANN({mem_report['embedding_index']['ann_backend']})={mem_report['embedding_index']['ann_index_mb']:.1f}MB  "
+          f"GPU_resident={mem_report['embedding_index']['gpu_resident_matrix_mb']:.1f}MB  "
           f"reranker={mem_report['reranker_model']['pickle_mb']:.2f}MB  "
           f"feature_store_on_disk={mem_report['feature_store_on_disk']['mb']:.1f}MB  "
-          f"total_serving={mem_report['total_serving_memory_mb']:.1f}MB")
+          f"total_serving(host RAM)={mem_report['total_serving_memory_mb']:.1f}MB")
 
     lat_report = measure_latency(fs, dataset, bm25, emb, n_trials=n_trials, seed=seed)
     print(f"[{dataset}] latency over {lat_report['n_trials']} single-user requests: "
@@ -352,14 +417,16 @@ def run(dataset: str, n_trials: int, seed: int) -> dict:
         "cost_qps": cost_report,
         "scaling_argument_10x": {
             "summary": "Horizontal replication (stateless, read-only indices) absorbs a 10x QPS "
-                        "increase at roughly fixed per-request latency, as long as corpus size is "
-                        "fixed -- each replica just needs its own full index copy. The first thing "
-                        "to break under a SIMULTANEOUS 10x QPS + 10x corpus-size increase is "
-                        "per-replica index memory (this sandbox's own IVF ANN fallback, used because "
-                        "faiss was not installable here, is the specific compute bottleneck at that "
-                        "scale, since it loops per-query in Python rather than batching like FAISS's "
-                        "C++ implementation does). GBDT reranking batches cheaply and is not expected "
-                        "to be the limiting stage. See this module's own docstring for the full "
+                        "increase at roughly fixed per-request latency at the CURRENT corpus size -- "
+                        "embedding retrieval runs exact brute-force search on GPU (see "
+                        "embeddings.py's EmbeddingIndex), not the CPU-Python-loop IVF fallback, so "
+                        "per-query cost is no longer the limiting factor it would be on CPU-only ANN. "
+                        "The first thing to break under a SIMULTANEOUS 10x QPS + 10x corpus-size "
+                        "increase is per-replica GPU VRAM capacity: each replica needs its own GPU "
+                        "large enough to hold the (roughly linearly growing) corpus embedding matrix, "
+                        "and GPUs scale out far less cheaply than CPU cores. GBDT reranking stays on "
+                        "CPU (scikit-learn has no GPU path), batches cheaply, and is not expected to be "
+                        "the limiting stage either way. See this module's own docstring for the full "
                         "reasoning this summary is drawn from.",
             "measured_inputs_used": {
                 "total_serving_memory_mb": mem_report["total_serving_memory_mb"],

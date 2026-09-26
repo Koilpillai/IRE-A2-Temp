@@ -161,10 +161,15 @@ def _score_chunk(
     bm25_cand_scores = bm25.batch_score_candidates(bm25_queries, candidates)
     embed_cand_scores = emb.batch_score_candidates(embed_queries_mat, candidates)
 
-    all_ranks: list[list[int]] = []
+    # Feature rows for every multi-candidate impression in this sub-batch go into ONE
+    # predict_proba call (spans[i] = that impression's slice), rather than one call per
+    # impression -- on a GPU-trained model each call is a host->device round trip, and
+    # there are millions of impressions in the Codabench test sets.
+    all_feat_rows: list[list[float]] = []
+    spans: list[tuple[int, int] | None] = []
     for ctx_row, cands, b_s, e_s in zip(row_ctx, candidates, bm25_cand_scores, embed_cand_scores):
         if len(cands) <= 1:
-            all_ranks.append([1] * len(cands))
+            spans.append(None)
             continue
 
         fused = hybrid_score(b_s, e_s)
@@ -175,7 +180,7 @@ def _score_chunk(
         cat_weight, total_w, hist_vec = ctx_row["cat_weight"], ctx_row["total_w"], ctx_row["hist_vec"]
         ref_time = ctx_row["ref_time"]
 
-        feat_rows = []
+        span_start = len(all_feat_rows)
         for cand in cands:
             cand_row = id_to_row.get(cand)
             cand_vec = article_vecs[cand_row] if cand_row is not None else None
@@ -204,12 +209,17 @@ def _score_chunk(
             if is_ebnerd:
                 feat["user_avg_read_time"] = ctx_row["avg_read"]
                 feat["user_avg_scroll_pct"] = ctx_row["avg_scroll"]
-            feat_rows.append(feat)
+            all_feat_rows.append([0.0 if feat.get(c) is None else feat[c] for c in feature_cols])
+        spans.append((span_start, len(all_feat_rows)))
 
-        X = np.array([[row.get(c, 0.0) if row.get(c) is not None else 0.0 for c in feature_cols] for row in feat_rows],
-                      dtype=np.float64)
-        scores = model.predict_proba(X)[:, 1]
-        all_ranks.append(scores_to_ranks(scores))
+    scores_all = (model.predict_proba(np.asarray(all_feat_rows, dtype=np.float32))[:, 1]
+                  if all_feat_rows else np.zeros(0, dtype=np.float32))
+    all_ranks: list[list[int]] = []
+    for cands, span in zip(candidates, spans):
+        if span is None:
+            all_ranks.append([1] * len(cands))
+        else:
+            all_ranks.append(scores_to_ranks(scores_all[span[0]:span[1]]))
     return all_ranks
 
 

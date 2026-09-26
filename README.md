@@ -120,7 +120,7 @@ Extracts impression-level behavioural features across four categories:
 
 ### 2. Two-Stage Retrieve-then-Rank (`pipeline/rerank.py`)
 - **Stage 1 (Retrieval)**: Candidate lists ($K \approx 5\text{--}300$) are retrieved and pre-scored using BM25 lexical matching and dense semantic embedding search.
-- **Stage 2 (Re-ranking)**: Scikit-learn's `HistGradientBoostingClassifier` is trained on pointwise click labels using the engineered behavioural features, re-ranking candidates by predicted click probability $P(\text{click})$.
+- **Stage 2 (Re-ranking)**: An XGBoost histogram GBDT (GPU when CUDA is available) is trained on pointwise click labels using the engineered behavioural features, re-ranking candidates by predicted click probability $P(\text{click})$.
 
 ### 3. Baseline & Ablation Study (`pipeline/ablation.py`)
 A non-personalized baseline (popularity, freshness, and position only) is evaluated alongside the full model under identical hyperparameters. Statistical significance is computed using 1,000 paired bootstrap iterations at the impression level, confirming that all gains exclude zero at a 95% confidence interval.

@@ -110,7 +110,7 @@ Unified schema  →  feature_store/<dataset>/{articles, behaviors_*, user_histor
 Behavioural feature engineering  →  behavioral_features_{train,val}.parquet
         │  pipeline/features.py  (Q1: click-history, session, article, position features)
         ▼
-Stage 2: GBDT re-ranker (HistGradientBoostingClassifier)
+Stage 2: GBDT re-ranker (XGBoost, GPU)
         │  pipeline/rerank.py (Q2)  +  pipeline/ablation.py (Q3, baseline vs. full + paired bootstrap CI)
         ▼
 Evaluation  →  outputs/<dataset>/{eval_metrics, rerank_metrics, ablation, recall_at_k}.json
@@ -314,7 +314,7 @@ Users with no click history get **neutral** feature defaults (0.0 similarity, 0.
 
 ### 8.1 Why GBDT (not a neural ranker)
 
-The assignment (Q2.2) offers two options: **Option A** — GBDT (LightGBM/XGBoost-style) over hand-crafted features, or **Option B** — a small neural ranker (NRMS-style or an MLP). This repo implements **Option A**, using scikit-learn's `HistGradientBoostingClassifier` — a histogram-binned gradient boosting implementation, functionally the same algorithm family as LightGBM/XGBoost, chosen because it ships with a dependency the pipeline already requires (scikit-learn) rather than needing a separate native-wheel install.
+The assignment (Q2.2) offers two options: **Option A** — GBDT (LightGBM/XGBoost-style) over hand-crafted features, or **Option B** — a small neural ranker (NRMS-style or an MLP). This repo implements **Option A**, using XGBoost's histogram GBDT (`XGBClassifier`, `tree_method="hist"`), trained on the GPU (`device="cuda"`) whenever a CUDA device is available and on CPU otherwise. An earlier version used scikit-learn's `HistGradientBoostingClassifier`, which has no GPU path; hyperparameters (300 rounds, learning rate 0.08, depth 6, L2 1.0) and the early-stopping scheme (stratified 10% holdout, 10 rounds of patience) were carried over unchanged.
 
 ### 8.2 What it predicts
 
@@ -327,7 +327,7 @@ This is in contrast to:
 - **Pairwise** methods (e.g. RankNet), which train on pairs of candidates from the same impression and learn to predict which of the two should rank higher — the loss directly penalizes wrongly-ordered pairs.
 - **Listwise** methods (e.g. LambdaMART, ListNet), which optimize a ranking metric (like NDCG) over the *entire* candidate list for an impression at once, so the loss is aware of full list order, not just single points or pairs.
 
-Pointwise is the simplest of the three to implement (it's an off-the-shelf binary classifier, no custom loss or group-aware training loop needed) and is what `HistGradientBoostingClassifier` supports out of the box — the tradeoff is that it optimizes classification accuracy per row rather than ranking quality per list, so it can be a slightly worse proxy for ranking metrics like NDCG/MRR than a pairwise or listwise loss would be.
+Pointwise is the simplest of the three to implement (it's an off-the-shelf binary classifier, no custom loss or group-aware training loop needed) and is what `XGBClassifier`'s default `binary:logistic` objective does out of the box — the tradeoff is that it optimizes classification accuracy per row rather than ranking quality per list, so it can be a slightly worse proxy for ranking metrics like NDCG/MRR than a pairwise or listwise loss would be.
 
 ### 8.3 Hyperparameters
 

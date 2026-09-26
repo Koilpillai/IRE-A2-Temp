@@ -11,8 +11,11 @@ scikit-learn
 gensim
 pyarrow
 pytest
+xgboost  # GBDT reranker (pipeline/common/reranker.py); PyPI wheels ship with CUDA support
 
 # Optional, auto-detected at import time (see pipeline/common/embeddings.py) --
 # not required to run anything below, but used automatically if present:
-#   torch       -- GPU-accelerated embedding similarity search (falls back to numpy)
-#   faiss-cpu   -- explicit ANN index object alongside the numpy/torch brute-force path
+#   torch       -- with CUDA: exact GPU embedding retrieval AND GPU GBDT training
+#                  (pipeline/common/reranker.py keys its device off the same check);
+#                  without it everything falls back to CPU
+#   faiss-cpu   -- CPU ANN index, used only when no CUDA GPU is available

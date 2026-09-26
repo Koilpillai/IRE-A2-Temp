@@ -131,6 +131,8 @@ def _normalize(mat: np.ndarray) -> np.ndarray:
 class EmbeddingIndex:
     """Dense article index: cosine similarity via normalized-dot-product, GPU if available."""
 
+    _GPU_BATCH_SIZE = 4096  # bounded by VRAM, not the CPU-RAM ceiling the CPU paths are sized for
+
     def __init__(self, doc_ids: list, vectors: np.ndarray, device: str = DEVICE):
         self.doc_ids = list(doc_ids)
         self.dim = vectors.shape[1]
@@ -139,12 +141,20 @@ class EmbeddingIndex:
         normed = _normalize(vectors).astype(np.float32)
         self.mat_np = normed
         self.mat_t = torch.from_numpy(normed).to(device) if (_HAS_TORCH and device != "numpy") else None
-        self.faiss_index = self._try_build_faiss(normed)
-        # ann_index is whichever ANN backend actually built: real HNSW if faiss is
-        # importable, else the from-scratch IVF implementation above (always available,
-        # numpy + sklearn) -- either way, `top_k_batch` queries an actual ANN index, not
-        # a brute-force scan.
-        self.ann_index = self.faiss_index if self.faiss_index is not None else IVFIndex(normed)
+        if device == "cuda" and self.mat_t is not None:
+            # top_k_batch prefers exact GPU brute-force over any CPU ANN index when
+            # CUDA is available (see top_k_batch's docstring) -- building FAISS/IVF
+            # here would just be wasted setup time (a k-means fit over the whole
+            # corpus) for an index that would never actually be queried.
+            self.faiss_index = None
+            self.ann_index = None
+        else:
+            self.faiss_index = self._try_build_faiss(normed)
+            # ann_index is whichever ANN backend actually built: real HNSW if faiss is
+            # importable, else the from-scratch IVF implementation above (always
+            # available, numpy + sklearn) -- either way, `top_k_batch` queries an actual
+            # ANN index, not a brute-force scan, on CPU-only environments.
+            self.ann_index = self.faiss_index if self.faiss_index is not None else IVFIndex(normed)
 
     @staticmethod
     def _try_build_faiss(normed: np.ndarray):
@@ -170,16 +180,31 @@ class EmbeddingIndex:
     def top_k_batch(self, query_vectors: np.ndarray, k: int, batch_size: int = 200) -> list[list]:
         """Full-corpus top-K retrieval per query vector. Used for Q3 recall@K.
 
-        Queries the FAISS HNSW index when available -- this is the actual ANN search,
-        not the exact brute-force fallback below it. Small batch_size on the fallback
-        path is deliberate: (batch x n_docs) is densified per batch, and at MIND/EB-NeRD
-        corpus scale (~125K docs) even a modest batch quickly reaches hundreds of MB --
-        see design note on this sandbox's tight (~4-7GB) RAM budget.
+        Order of preference: exact GPU brute-force (when CUDA is actually available)
+        first -- at this corpus scale (~125K docs x 128-dim, tens of MB) it's both
+        faster AND exact, unlike the CPU ANN paths below, which exist only because the
+        original dev sandbox had no GPU at all. FAISS HNSW / from-scratch IVF (CPU,
+        approximate) is the fallback for CPU-only environments. Plain numpy brute-force
+        (also CPU) is the last resort. Small batch_size on the CPU paths is deliberate:
+        (batch x n_docs) is densified per batch, and at MIND/EB-NeRD corpus scale even a
+        modest batch quickly reaches hundreds of MB -- see design note on CPU-only
+        sandboxes' tight (~4-7GB) RAM budget. That RAM ceiling doesn't apply to the GPU
+        path (bounded by VRAM instead), so it uses its own larger batch size.
         """
         import gc
         qn = _normalize(query_vectors).astype(np.float32)
         results: list[list] = []
-        if self.ann_index is not None:
+        if self.mat_t is not None and self.device == "cuda":
+            gpu_batch = max(batch_size, self._GPU_BATCH_SIZE)
+            q = torch.from_numpy(qn).to(self.device)
+            for start in range(0, q.shape[0], gpu_batch):
+                sims = q[start:start + gpu_batch] @ self.mat_t.T
+                kk = min(k, sims.shape[1])
+                _, top_idx = torch.topk(sims, kk, dim=1)
+                for row in top_idx.cpu().numpy():
+                    results.append([self.doc_ids[i] for i in row])
+                del sims, top_idx
+        elif self.ann_index is not None:
             for start in range(0, qn.shape[0], batch_size):
                 _, idx_batch = self.ann_index.search(np.ascontiguousarray(qn[start:start + batch_size]), k)
                 for row in idx_batch:
