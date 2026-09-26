@@ -5,11 +5,11 @@
 Github Link: https://github.com/Koilpillai/IRE-A2-Temp
 ---
 
-## Executive Summary
+## Project Summary
 
-This report presents the implementation, evaluation, and scaling analysis of a two-stage retrieval-and-ranking system for news recommendation on the Microsoft News Dataset (**MIND**) and Ekstra Bladet News Recommendation Dataset (**EB-NeRD**). 
+This report presents the implementation, evaluation, and scaling analysis of a two-stage retrieval-and-ranking system for news recommendation on the MIND and EB-NeRD datasets. 
 
-Building upon the lexical (BM25) and semantic (Word2Vec) retrieval pipeline from Assignment 1, we incorporate behavioural signals derived from historical click-logs to train a gradient boosted decision tree (GBDT) re-ranker. We reproduce a non-personalized baseline and demonstrate statistically significant gains when introducing personalized historical and session features. We also conduct an empirical serving and latency benchmark, analyze scaling bottlenecks at $10\times$ load, verify anti-leakage constraints via unit tests, and prepare validated submission files for both Codabench competitions.
+Building upon the lexical (BM25) and semantic (Word2Vec) retrieval pipeline from Assignment 1, we incorporate behavioural signals derived from historical click-logs to train a gradient boosted decision tree (GBDT) re-ranker. We reproduce a non-personalized baseline and demonstrate statistically significant gains when introducing personalized historical and session features. <!-- We also conduct an empirical serving and latency benchmark, analyze scaling bottlenecks at 10x load, verify anti-leakage constraints via unit tests, and prepare validated submission files for both Codabench competitions. -->
 
 ---
 
@@ -45,7 +45,7 @@ For each impression–candidate pair, we extract a vector of behavioural feature
 ### Behavioural-Window Boundary Enforcement (Q1.4 / Q9)
 
 To ensure zero future-click leakage at training and serving time:
-- **Popularity**: Counted strictly from `behaviors_train.parquet`. Validation and test impressions reuse train counts without updating. For training rows, a clicked candidate's own click is subtracted from its count (leave-one-out), so the feature never encodes the row's own label.
+- **Popularity**: Counted strictly from `behaviors_train.parquet`. Validation and test impressions reuse train counts without updating. For training rows, a clicked candidate's own click is subtracted from its count, so the feature never encodes the row's own label.
 - **Session Progress**: `session_position` counts only preceding impressions in the split, never total session size.
 - **Freshness**: The MIND first-appearance lookup table is populated solely from training candidate pools.
 - **User Histories**: Features are computed strictly against the user history table associated with that temporal partition.
@@ -55,12 +55,12 @@ To ensure zero future-click leakage at training and serving time:
 ## Q2. Two-Stage Retrieve-then-Rank Pipeline
 
 Our two-stage architecture operates as follows:
-1. **Candidate Retrieval (Stage 1)**: For each impression, Assignment 1's BM25 lexical retriever and dense Word2Vec embedding search are queried with the user's click history (top-$K = 100$ per channel; the union gives roughly 100--200 candidates), and each candidate's rank under the fused BM25 + embedding score is kept as a feature. If the clicked article is not retrieved it is added to the pool so the supervised label is preserved; this makes the training pool differ from the platform's candidate lists, so ranking quality is measured on the platform-supplied lists. At Codabench serving time the candidate set is the platform-supplied list (the server checks a permutation of it), and the same fused score ranks that fixed list.
+1. **Candidate Retrieval (Stage 1)**: For each impression, Assignment 1's BM25 lexical retriever and dense Word2Vec embedding search are queried with the user's click history (top-$K = 100$ per channel; the union gives roughly 100 - 200 candidates), and each candidate's rank under the fused BM25 + embedding score is kept as a feature. If the clicked article is not retrieved it is added to the pool so the supervised label is preserved - this makes the training pool differ from the platform's candidate lists, so ranking quality is measured on the platform-supplied lists. <!-- At Codabench serving time the candidate set is the platform-supplied list (the server checks a permutation of it), and the same fused score ranks that fixed list. -->
 2. **Re-ranking (Stage 2)**: We train a pointwise XGBoost histogram GBDT (`XGBClassifier`, up to 300 boosting rounds with early stopping, trained on the GPU via CUDA) on the engineered behavioural features from Q1 to predict the probability of a click, $P(\text{click} \mid \text{user}, \text{candidate})$. Candidates are sorted in descending order of predicted probability.
 
 ### Performance Before and After Re-Ranking (Q2)
 
-*Evaluated on each impression's platform-supplied candidate list (matching the exact Codabench competition setting).*
+Evaluated on each impression's platform-supplied candidate list<!--(matching the exact Codabench competition setting)-->.
 
 | Dataset | Model / Stage | AUC | MRR | nDCG@5 | nDCG@10 |
 | :--- | :--- | :---: | :---: | :---: | :---: |
@@ -74,7 +74,7 @@ Our two-stage architecture operates as follows:
 
 ### Discussion
 
-On the official front-page candidate lists, distinguishing the clicked article from other breaking headlines is a competitive task where lexical BM25 matching performs strongly on titles (0.5685 AUC). When scored with our GBDT re-ranker, the model scores **0.5575** AUC on validation, which translates directly to **0.5166** AUC on the unlabelled Codabench test set. On EB-NeRD, the re-ranker achieves **0.5350** AUC.
+On the official front-page candidate lists, distinguishing the clicked article from other breaking headlines is a competitive task where lexical BM25 matching performs strongly on titles (**0.5685** AUC). When scored with our GBDT re-ranker on validation, the model scores **0.5575** AUC on MIND, and **0.5350** AUC on EB-NeRD.
 
 Comparing a re-ranker trained on pointwise cross-entropy against lexical ranking scores reflects fundamentally different scoring distributions. The true marginal benefit of behavioural features is evaluated cleanly against an identical non-personalized baseline in Q3.
 
@@ -90,7 +90,7 @@ Comparing a re-ranker trained on pointwise cross-entropy against lexical ranking
 
 ### Ablation Results with Paired Bootstrap 95% Confidence Intervals
 
-*Statistical significance assessed via 1,000 paired bootstrap resamples at the impression level.*
+(Statistical significance assessed via 1,000 paired bootstrap resamples at the impression level)
 
 | Dataset | Metric | Baseline | Full Model | Paired $\Delta$ | 95% Bootstrap CI | Significant? |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -117,8 +117,8 @@ To isolate which feature group specifically drives the performance uplift over t
 ### Key Findings
 
 1. **Statistical Significance**: All paired gains are strictly positive across every metric, and every 95% bootstrap confidence interval safely excludes zero (`excludes_zero: true`).
-2. **Primary Driver of Uplift**: As demonstrated by the incremental ablation, **user click-history features drive the vast majority of the performance gain** (+0.0143 AUC over baseline on MIND). Session progress and top-category matching add fine-grained refinements (+0.0013 combined).
-3. **Impact of Rich Behavioural Context**: The performance uplift on EB-NeRD (+0.0930 AUC, +0.0524 MRR) is markedly higher than on MIND (+0.0156 AUC, +0.0243 MRR). This directly reflects the quality of EB-NeRD's logging signals: exact timestamps for exponential time-decay weighting, plus granular engagement metrics (dwell time and scroll depth), provide significantly more discriminative power than MIND's coarse rank-decay proxy.
+2. **Primary Driver of Uplift**: As demonstrated by the incremental ablation, user click-history features drive the vast majority of the performance gain (+0.0143 AUC over baseline on MIND). Session progress and top-category matching add fine-grained refinements (+0.0013 combined).
+3. **Impact of Rich Behavioural Context**: The performance uplift on EB-NeRD (+0.0930 AUC, +0.0524 MRR) is markedly higher than on MIND (+0.0156 AUC, +0.0243 MRR). This directly reflects the quality of EB-NeRD's logging signals - exact timestamps for exponential time-decay weighting, plus granular engagement metrics (dwell time and scroll depth), provide significantly more discriminative power than MIND's coarse rank-decay proxy.
 
 ---
 
@@ -156,9 +156,9 @@ At a target SLA of $p_{99} < 100\,\text{ms}$, a single core does not meet produc
 ### $10\times$ Scaling Argument: What Breaks First?
 
 - **$10\times$ Query Volume (10,000 QPS)**: Because the candidate index and GBDT model are read-only and stateless, query traffic scales horizontally. Queries can be load-balanced across replicas without altering per-query latency.
-- **Simultaneous $10\times$ Corpus Scale ($\sim 1.25\text{M}$ Articles)**:
-  - *Memory*: The dense embedding matrix grows to $\sim 643\,\text{MB}$ per replica, and BM25 expands to $\sim 200\,\text{MB}$. While manageable, this increases the baseline RAM requirement across every replica.
-  - *Compute Bottleneck*: **Embedding search breaks first.** With a CUDA GPU, embedding retrieval is an exact brute-force matrix product plus top-$K$ over the article matrix, so its cost grows linearly with catalog size and the resident matrix ($\sim 643\,\text{MB}$ at $10\times$) becomes the binding constraint on GPU memory. Without a GPU, the fallback ANN index (FAISS, or a custom IVF index executing centroid checks and bucket traversals in Python) degrades as each Voronoi cell grows tenfold, and single-threaded search latency dominates the request pipeline. By contrast, GBDT re-ranking evaluates only the top-$K$ candidates ($K \approx 100\text{--}200$), so its compute cost remains constant regardless of total catalog size.
+- **Simultaneous 10x Corpus Scale ($\sim 1.25\text{M}$ Articles)**:
+  - **Memory**: The dense embedding matrix grows to $\sim 643\,\text{MB}$ per replica, and BM25 expands to $\sim 200\,\text{MB}$. While manageable, this increases the baseline RAM requirement across every replica.
+  - **Compute Bottleneck**: Embedding search breaks first. With a CUDA GPU, embedding retrieval is an exact brute-force matrix product plus top-K over the article matrix, so its cost grows linearly with catalog size and the resident matrix ($\sim 643\,\text{MB}$ at 10x) becomes the binding constraint on GPU memory. Without a GPU, the ANN index degrades as each Voronoi cell grows tenfold, and single-threaded search latency dominates the request pipeline. By contrast, GBDT re-ranking evaluates only the top-K candidates ($K \approx 100\text{--}200$), so its compute cost remains constant regardless of total catalog size.
 
 ---
 
@@ -179,7 +179,7 @@ Performance was evaluated across user engagement slices (Cold-start: $\le 5$ cli
 | | All | Head Articles | 4,704 | 0.5141 | 0.3000 | 0.3059 | 0.3908 |
 | | All | Tail Articles | 239,943 | 0.5207 | 0.3336 | 0.3676 | 0.4491 |
 
-*Observation*: On MIND, warm users achieve higher AUC (0.5768 vs. 0.5301) due to richer historical query signals. Tail articles consistently exhibit higher ranking metrics than head articles because candidate sets containing head articles suffer from higher competition and position bias.
+**Observations:** On MIND, warm users achieve higher AUC (0.5768 vs. 0.5301) due to richer historical query signals. Tail articles consistently exhibit higher ranking metrics than head articles because candidate sets containing head articles suffer from higher competition and position bias.
 
 ### 2. Beyond-Accuracy Metrics (Full Corpus, Top-10)
 
@@ -190,7 +190,7 @@ Performance was evaluated across user engagement slices (Cold-start: $\le 5$ cli
 | **EB-NeRD** | BM25 | 0.340 | 12.46 | 7.4% |
 | | Word2Vec Embedding | 0.001 | 18.39 | 1.5% |
 
-*Embedding Anisotropy*: Word2Vec embeddings on EB-NeRD exhibit an average cosine similarity near 1.0 (mean vector norm $\approx 0.77$). This severe geometric anisotropy causes dense retrieval to repeatedly select the same narrow cluster of articles, yielding an intra-list diversity of 0.001 and catalog coverage of just 1.5%. BM25 delivers substantially healthier coverage and diversity across both corpora.
+**Embedding Anisotropy**: Word2Vec embeddings on EB-NeRD exhibit an average cosine similarity near 1.0 (mean vector norm $\approx 0.77$). This severe geometric anisotropy causes dense retrieval to repeatedly select the same narrow cluster of articles, yielding an intra-list diversity of 0.001 and catalog coverage of just 1.5%. BM25 delivers substantially healthier coverage and diversity across both corpora.
 
 ### 3. Open-Corpus Retrieval Recall@K (Before Re-Ranking)
 
@@ -207,7 +207,7 @@ BM25 dominates semantic embedding retrieval across all cutoffs. In fast-decaying
 
 ### 4. Codabench Competition Submissions
 
-Predictions were generated by chunked streaming over the unlabelled test sets. The MIND submission scores each impression's platform-supplied candidate list with the trained GBDT re-ranker (features computed with the same formulas as training; `candidate_position` from the fused BM25 + embedding rank of the given candidates). The EB-NeRD submission archive comes from the earlier training-free rank fusion of min-max normalized BM25 and embedding scores (train-set popularity fallback for empty-history sessions) and has not been regenerated with the GBDT:
+Predictions were generated by chunked streaming over the unlabelled test sets. The MIND and EB-NeRD submission scores each impression's platform-supplied candidate list with the trained GBDT re-ranker (features computed with the same formulas as training; `candidate_position` from the fused BM25 + embedding rank of the given candidates).
 
 | Competition | Submission Archive | Evaluated Rows | Format & Integrity Validation |
 | :--- | :--- | :---: | :--- |
@@ -231,9 +231,9 @@ All temporal boundaries and feature extraction invariants are systematically enf
    - `test_features_session_position_starts_at_zero`: Confirms that `session_position` starts at 0 for every user's first impression and increments monotonically.
    - `test_features_empty_history_is_neutral`: Ensures cold-start users receive neutral feature values (0.0 similarity and 0.0 category overlap) rather than leaked defaults.
 
-### Anti-Gaming Quantitative Evaluation (Q9.1)
+### Anti-Gaming Quantitative Evaluation (Q9)
 
-Per Q9 requirements, we train and evaluate models with and without position features (`candidate_position` and `candidate_position_norm`) to test whether serving-unavailable information quietly leaks into rankings:
+Per Q9 requirements, we train and evaluate models with and without position features (`candidate_position` and `candidate_position_norm`).
 
 | Dataset | Evaluation Setting | AUC | MRR | nDCG@5 | nDCG@10 |
 | :--- | :--- | :---: | :---: | :---: | :---: |
@@ -244,7 +244,7 @@ Per Q9 requirements, we train and evaluate models with and without position feat
 | | Without Position Features | 0.5241 | 0.2895 | 0.3298 | 0.4182 |
 | | **Observed Gap** | **+0.0109** | +0.0161 | +0.0189 | +0.0179 |
 
-*Verification*: The AUC gaps (+0.0093 on MIND, +0.0109 on EB-NeRD) are well within the 0.05 safety margin (`large_gap_flag: false`), quantitatively confirming that candidate position features reflect genuine retrieval rank ordering rather than artificial label leakage.
+**Verification:** The AUC gaps (+0.0093 on MIND, +0.0109 on EB-NeRD) are well within the 0.05 safety margin (`large_gap_flag: false`), quantitatively confirming that candidate position features reflect genuine retrieval rank ordering rather than artificial label leakage.
 
 **Test Suite Status**: 20 tests passed, 2 skipped (expected empty-sample guards).
 
