@@ -10,32 +10,34 @@
     "embedding_index": {
       "dense_matrix_bytes": 64302080,
       "dense_matrix_mb": 64.30208,
-      "ann_backend": "ivf_from_scratch",
-      "ann_index_bytes": 1135792,
-      "ann_index_mb": 1.135792,
+      "ann_backend": "gpu_exact_bruteforce",
+      "ann_index_bytes": 0,
+      "ann_index_mb": 0.0,
+      "gpu_resident_matrix_bytes": 64302080,
+      "gpu_resident_matrix_mb": 64.30208,
       "dim": 128,
       "n_docs": 125590
     },
     "reranker_model": {
-      "pickle_bytes": 1019095,
-      "pickle_mb": 1.019095
+      "pickle_bytes": 1330155,
+      "pickle_mb": 1.330155
     },
     "feature_store_on_disk": {
-      "bytes": 446274872,
-      "mb": 446.274872,
+      "bytes": 1308250220,
+      "mb": 1308.25022,
       "n_files": 12
     },
-    "total_serving_memory_mb": 92.387331,
-    "process_peak_rss_mb": 620.016
+    "total_serving_memory_mb": 91.562599,
+    "process_peak_rss_mb": 982.268
   },
   "latency": {
     "n_trials": 500,
-    "mean_ms": 333.02034405598533,
-    "p50_ms": 227.0644514937885,
-    "p95_ms": 711.1835327494189,
-    "p99_ms": 1180.334503948979,
-    "max_ms": 1618.4863600065,
-    "min_ms": 48.09282399946824
+    "mean_ms": 35.043677799985744,
+    "p50_ms": 34.74800000185496,
+    "p95_ms": 39.26034499836531,
+    "p99_ms": 49.91841999995813,
+    "max_ms": 52.6123000017833,
+    "min_ms": 21.711999997933162
   },
   "cost_qps": {
     "assumptions": {
@@ -44,17 +46,17 @@
       "target_sustained_qps": 1000.0,
       "single_request_at_a_time_per_core": true
     },
-    "qps_per_core": 3.0028195509637876,
-    "cost_per_1000_queries_usd": 0.00462528255633313,
-    "p99_meets_sla_single_core": false,
-    "cores_needed_to_sustain_target_qps": 334
+    "qps_per_core": 28.535817664674646,
+    "cost_per_1000_queries_usd": 0.00048671774722202434,
+    "p99_meets_sla_single_core": true,
+    "cores_needed_to_sustain_target_qps": 36
   },
   "scaling_argument_10x": {
-    "summary": "Horizontal replication (stateless, read-only indices) absorbs a 10x QPS increase at roughly fixed per-request latency, as long as corpus size is fixed -- each replica just needs its own full index copy. The first thing to break under a SIMULTANEOUS 10x QPS + 10x corpus-size increase is per-replica index memory (this sandbox's own IVF ANN fallback, used because faiss was not installable here, is the specific compute bottleneck at that scale, since it loops per-query in Python rather than batching like FAISS's C++ implementation does). GBDT reranking batches cheaply and is not expected to be the limiting stage. See this module's own docstring for the full reasoning this summary is drawn from.",
+    "summary": "Horizontal replication (stateless, read-only indices) absorbs a 10x QPS increase at roughly fixed per-request latency at the CURRENT corpus size -- embedding retrieval runs exact brute-force search on GPU (see embeddings.py's EmbeddingIndex), not the CPU-Python-loop IVF fallback, so per-query cost is no longer the limiting factor it would be on CPU-only ANN. The first thing to break under a SIMULTANEOUS 10x QPS + 10x corpus-size increase is per-replica GPU VRAM capacity: each replica needs its own GPU large enough to hold the (roughly linearly growing) corpus embedding matrix, and GPUs scale out far less cheaply than CPU cores. GBDT reranking stays on CPU (scikit-learn has no GPU path), batches cheaply, and is not expected to be the limiting stage either way. See this module's own docstring for the full reasoning this summary is drawn from.",
     "measured_inputs_used": {
-      "total_serving_memory_mb": 92.387331,
-      "ann_backend": "ivf_from_scratch",
-      "p99_latency_ms": 1180.334503948979
+      "total_serving_memory_mb": 91.562599,
+      "ann_backend": "gpu_exact_bruteforce",
+      "p99_latency_ms": 49.91841999995813
     }
   }
 }

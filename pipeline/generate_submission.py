@@ -44,7 +44,7 @@ from pipeline.adapters import ebnerd as ebnerd_adapter
 from pipeline.adapters import mind as mind_adapter
 from pipeline.common import behavioral_features as bf
 from pipeline.common.bm25 import BM25Index
-from pipeline.common.embeddings import EmbeddingIndex
+from pipeline.common.embeddings import DEVICE, EmbeddingIndex
 from pipeline.common.popularity import train_popularity as _train_popularity
 from pipeline.common.submission import format_line, hybrid_score, scores_to_ranks, write_submission_zip
 
@@ -58,13 +58,20 @@ def _load_context(fs: Path) -> dict:
     article_vecs = np.load(fs / "article_embeddings.npy")
     emb = EmbeddingIndex(articles["article_id"].tolist(), article_vecs)
     model_bundle = joblib.load(fs / "reranker_model.joblib")
+    model = model_bundle["model"]
+    if DEVICE != "cuda":
+        # A GPU-trained booster still runs fine on CPU-only inference (tree traversal,
+        # not matrix ops) -- but only once its device param is explicitly flipped, so a
+        # parallel worker process with no CUDA visible (see _run_mind_parallel) doesn't
+        # try to touch a GPU that isn't there.
+        model.set_params(device="cpu")
     return {
         "bm25": bm25, "emb": emb, "article_vecs": article_vecs,
         "id_to_row": {a: i for i, a in enumerate(articles["article_id"])},
         "id_to_text": dict(zip(articles["article_id"], articles["text_lexical"])),
         "id_to_category": dict(zip(articles["article_id"], articles["category"])),
         "popularity": _train_popularity(fs),
-        "model": model_bundle["model"], "feature_cols": model_bundle["feature_cols"],
+        "model": model, "feature_cols": model_bundle["feature_cols"],
     }
 
 
@@ -234,7 +241,11 @@ def _score_chunk_subbatched(impression_ids, user_ids, ref_times, histories, cand
     return out
 
 
-def run_mind(sample: int | None = None):
+def run_mind(sample: int | None = None, skip_rows: int = 0, n_rows: int | None = None,
+             out_txt: Path | None = None, zip_output: bool = True):
+    """`skip_rows`/`n_rows`/`out_txt` let a caller process one contiguous row-range slice
+    of the test file into its own partial output file (used to fan this out across
+    parallel worker processes); defaults reproduce the original single-process behavior."""
     fs = config.FEATURE_STORE / "mind"
     ctx = _load_context(fs)
     first_appearance = bf.mind_first_appearance(fs)
@@ -242,11 +253,13 @@ def run_mind(sample: int | None = None):
     test_path = config.MIND_TEST_DIR / "behaviors.tsv"
     session_pos = _session_positions_mind_test(test_path)
 
-    out_txt = config.Q5_MIND_DIR / "prediction.txt"
+    if out_txt is None:
+        out_txt = config.Q5_MIND_DIR / "prediction.txt"
     n_written = 0
     t0 = time.time()
     with open(out_txt, "w") as f:
-        for chunk in mind_adapter.stream_behaviors_chunks(test_path, has_labels=False, chunk_rows=100_000):
+        for chunk in mind_adapter.stream_behaviors_chunks(
+                test_path, has_labels=False, chunk_rows=100_000, skip_rows=skip_rows, n_rows=n_rows):
             if sample is not None:
                 chunk = chunk.head(sample)
             ranks = _score_chunk_subbatched(
@@ -263,9 +276,10 @@ def run_mind(sample: int | None = None):
             if sample is not None:
                 break
 
-    write_submission_zip(out_txt, config.Q5_MIND_DIR / "prediction.zip", "prediction.txt")
-    print(f"[mind] DONE: {n_written:,} predictions -> {out_txt} and prediction.zip "
-          f"({time.time()-t0:.0f}s total)")
+    if zip_output:
+        write_submission_zip(out_txt, config.Q5_MIND_DIR / "prediction.zip", "prediction.txt")
+    print(f"[mind] DONE: {n_written:,} predictions -> {out_txt}"
+          f"{' and prediction.zip' if zip_output else ''} ({time.time()-t0:.0f}s total)")
 
 
 def run_ebnerd(sample: int | None = None):
@@ -324,11 +338,19 @@ def main():
     parser = argparse.ArgumentParser(description="Q5: generate Codabench submission files.")
     parser.add_argument("--dataset", choices=["mind", "ebnerd", "all"], default="all")
     parser.add_argument("--sample", type=int, default=None, help="only process first N rows of first chunk (smoke test)")
+    parser.add_argument("--skip-rows", type=int, default=0,
+                         help="mind only: skip this many data rows of the test file (parallel worker slicing)")
+    parser.add_argument("--n-rows", type=int, default=None,
+                         help="mind only: process only this many rows starting at --skip-rows")
+    parser.add_argument("--out", type=str, default=None,
+                         help="mind only: write predictions to this path instead of Q5_MIND/prediction.txt, "
+                              "and skip building prediction.zip (used for parallel worker partial files)")
     args = parser.parse_args()
     config.Q5_MIND_DIR.mkdir(parents=True, exist_ok=True)
     config.Q5_EBNERD_DIR.mkdir(parents=True, exist_ok=True)
     if args.dataset in ("mind", "all"):
-        run_mind(sample=args.sample)
+        run_mind(sample=args.sample, skip_rows=args.skip_rows, n_rows=args.n_rows,
+                  out_txt=Path(args.out) if args.out else None, zip_output=args.out is None)
     if args.dataset in ("ebnerd", "all"):
         run_ebnerd(sample=args.sample)
 

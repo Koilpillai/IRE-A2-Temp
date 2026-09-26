@@ -81,9 +81,16 @@ def load_behaviors(path: Path, has_labels: bool) -> pd.DataFrame:
     return _process_chunk(df, has_labels)
 
 
-def stream_behaviors_chunks(path: Path, has_labels: bool, chunk_rows: int = 200_000):
-    """Chunked generator for the large (2.37M-row) test file -- bounds peak memory."""
+def stream_behaviors_chunks(path: Path, has_labels: bool, chunk_rows: int = 200_000,
+                             skip_rows: int = 0, n_rows: int | None = None):
+    """Chunked generator for the large (2.37M-row) test file -- bounds peak memory.
+
+    `skip_rows`/`n_rows` let a caller process a contiguous row-range slice of the file
+    (no header row, so skip_rows counts data rows directly) -- used to fan this out
+    across parallel worker processes; default values are a no-op over the whole file.
+    """
     reader = pd.read_csv(path, sep="\t", header=None, names=BEHAVIOR_COLS, quoting=3,
-                          dtype={"impression_id": "int64", "user_id": "str"}, chunksize=chunk_rows)
+                          dtype={"impression_id": "int64", "user_id": "str"}, chunksize=chunk_rows,
+                          skiprows=skip_rows, nrows=n_rows)
     for chunk in reader:
         yield _process_chunk(chunk, has_labels)
