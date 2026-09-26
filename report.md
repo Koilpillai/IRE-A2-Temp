@@ -40,12 +40,12 @@ For each impression–candidate pair, we extract a vector of behavioural feature
    - `popularity_log`: $\log(1 + \text{clicks})$, calculated strictly from the training split.
    - `freshness_hours`: Elapsed hours since publication for EB-NeRD. For MIND (which lacks publication metadata), freshness is computed as the elapsed hours since the article's first observed appearance in training candidate lists.
    - `category_match`: Binary indicator denoting whether the candidate matches the user's most frequently clicked category.
-   - `candidate_position` & `candidate_position_norm`: Original display index and list-normalized position to capture position bias.
+   - `candidate_position` & `candidate_position_norm`: The candidate's rank under Assignment 1's fused BM25 + embedding retrieval score, and that rank normalized by list length (a retrieval-rank signal, not the platform's display index).
 
 ### Behavioural-Window Boundary Enforcement (Q1.4 / Q9)
 
 To ensure zero future-click leakage at training and serving time:
-- **Popularity**: Counted strictly from `behaviors_train.parquet`. Validation and test impressions reuse train counts without updating.
+- **Popularity**: Counted strictly from `behaviors_train.parquet`. Validation and test impressions reuse train counts without updating. For training rows, a clicked candidate's own click is subtracted from its count (leave-one-out), so the feature never encodes the row's own label.
 - **Session Progress**: `session_position` counts only preceding impressions in the split, never total session size.
 - **Freshness**: The MIND first-appearance lookup table is populated solely from training candidate pools.
 - **User Histories**: Features are computed strictly against the user history table associated with that temporal partition.
@@ -55,10 +55,12 @@ To ensure zero future-click leakage at training and serving time:
 ## Q2. Two-Stage Retrieve-then-Rank Pipeline
 
 Our two-stage architecture operates as follows:
-1. **Candidate Retrieval (Stage 1)**: For each impression, candidate pools ($K \approx 5\text{--}300$ items) are retrieved and scored using Assignment 1's BM25 lexical retriever and dense Word2Vec embedding search.
-2. **Re-ranking (Stage 2)**: We train a pointwise `HistGradientBoostingClassifier` (scikit-learn GBDT, 300 iterations) on the engineered behavioural features from Q1 to predict the probability of a click, $P(\text{click} \mid \text{user}, \text{candidate})$. Candidates are sorted in descending order of predicted probability.
+1. **Candidate Retrieval (Stage 1)**: For each impression, Assignment 1's BM25 lexical retriever and dense Word2Vec embedding search are queried with the user's click history (top-$K = 100$ per channel; the union gives roughly 100--200 candidates), and each candidate's rank under the fused BM25 + embedding score is kept as a feature. If the clicked article is not retrieved it is added to the pool so the supervised label is preserved; this makes the training pool differ from the platform's candidate lists, so ranking quality is measured on the platform-supplied lists. At Codabench serving time the candidate set is the platform-supplied list (the server checks a permutation of it), and the same fused score ranks that fixed list.
+2. **Re-ranking (Stage 2)**: We train a pointwise XGBoost histogram GBDT (`XGBClassifier`, up to 300 boosting rounds with early stopping, trained on the GPU via CUDA) on the engineered behavioural features from Q1 to predict the probability of a click, $P(\text{click} \mid \text{user}, \text{candidate})$. Candidates are sorted in descending order of predicted probability.
 
 ### Performance Before and After Re-Ranking
+
+*Note: the figures in Q2--Q5 were computed over each impression's platform-supplied candidate list in an earlier run of the pipeline (scikit-learn histogram GBDT trained on that list). The final codebase differs as described in Stage 1 and Stage 2 above.*
 
 | Dataset | Model / Stage | AUC | MRR | nDCG@5 | nDCG@10 |
 | :--- | :--- | :---: | :---: | :---: | :---: |
@@ -83,7 +85,7 @@ Comparing a re-ranker trained on pointwise cross-entropy against lexical ranking
 
 - **Baseline**: A non-personalized GBDT trained solely on `popularity_log`, `freshness_hours`, and `candidate_position_norm`. It excludes all user click histories, category affinities, and session context.
 - **Full Model**: The complete GBDT incorporating all Q1 behavioural, historical, and session features.
-- Both models share identical model families, hyperparameters (300 trees, learning rate 0.1), training splits, and random seeds.
+- Both models share identical model families, hyperparameters (up to 300 trees, learning rate 0.08, depth 6), training splits, and random seeds.
 
 ### Ablation Results with Paired Bootstrap 95% Confidence Intervals
 
@@ -143,7 +145,7 @@ At a target SLA of $p_{99} < 100\,\text{ms}$, a single core does not meet produc
 - **$10\times$ Query Volume (10,000 QPS)**: Because the candidate index and GBDT model are read-only and stateless, query traffic scales horizontally. Queries can be load-balanced across replicas without altering per-query latency.
 - **Simultaneous $10\times$ Corpus Scale ($\sim 1.25\text{M}$ Articles)**:
   - *Memory*: The dense embedding matrix grows to $\sim 643\,\text{MB}$ per replica, and BM25 expands to $\sim 200\,\text{MB}$. While manageable, this increases the baseline RAM requirement across every replica.
-  - *Compute Bottleneck*: **The ANN vector search breaks first.** In this environment, ANN candidate generation relies on a custom IVF index executing centroid distance checks and bucket traversals in Python rather than native vectorized C++ libraries (such as optimized FAISS). As the number of vectors in each Voronoi cell scales tenfold, single-threaded IVF search latency compounds, dominating the request pipeline. By contrast, GBDT re-ranking evaluates only the top-$K$ candidates ($K \approx 100\text{--}200$), so its compute cost remains constant regardless of total catalog size.
+  - *Compute Bottleneck*: **Embedding search breaks first.** With a CUDA GPU, embedding retrieval is an exact brute-force matrix product plus top-$K$ over the article matrix, so its cost grows linearly with catalog size and the resident matrix ($\sim 643\,\text{MB}$ at $10\times$) becomes the binding constraint on GPU memory. Without a GPU, the fallback ANN index (FAISS, or a custom IVF index executing centroid checks and bucket traversals in Python) degrades as each Voronoi cell grows tenfold, and single-threaded search latency dominates the request pipeline. By contrast, GBDT re-ranking evaluates only the top-$K$ candidates ($K \approx 100\text{--}200$), so its compute cost remains constant regardless of total catalog size.
 
 ---
 
@@ -192,7 +194,7 @@ BM25 dominates semantic embedding retrieval across all cutoffs. In fast-decaying
 
 ### 4. Codabench Competition Submissions
 
-Predictions were generated by chunked streaming over the unlabelled test sets, combining min-max normalized BM25 and embedding scores via rank fusion, with train-set popularity fallback for empty-history sessions:
+Predictions were generated by chunked streaming over the unlabelled test sets. The MIND submission scores each impression's platform-supplied candidate list with the trained GBDT re-ranker (features computed with the same formulas as training; `candidate_position` from the fused BM25 + embedding rank of the given candidates). The EB-NeRD submission archive comes from the earlier training-free rank fusion of min-max normalized BM25 and embedding scores (train-set popularity fallback for empty-history sessions) and has not been regenerated with the GBDT:
 
 | Competition | Submission Archive | Evaluated Rows | Format & Integrity Validation |
 | :--- | :--- | :---: | :--- |
@@ -220,6 +222,6 @@ All temporal boundaries and feature extraction invariants are systematically enf
 
 ### Screenshots of submissions : 
 - MIND:
-![alt text](mind.png)
+![alt text](image.png)
 - EB-NeRD:
 ![alt text](ebnerd.png)
