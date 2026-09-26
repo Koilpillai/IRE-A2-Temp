@@ -19,6 +19,13 @@ impression delta (full's score minus baseline's score, same impression, same lab
 and bootstraps that delta array directly -- a paired bootstrap, not two independent
 ones -- then checks whether the resulting 95% CI excludes zero.
 
+Q3.3's "ablation study isolating the contribution of your improvement" is two things
+here, not one: the baseline-vs-full comparison above (does the FULL feature set beat a
+non-personalized baseline), AND a per-feature-group INCREMENTAL ablation below (which
+specific feature group -- click-history, session, or position -- actually drives that
+gain, added one at a time on top of the baseline). A single "minimal vs everything at
+once" comparison can't tell those apart; the incremental version can.
+
 Usage:
     python -m pipeline.ablation --dataset mind
     python -m pipeline.ablation --dataset ebnerd
@@ -38,7 +45,7 @@ from sklearn.metrics import roc_auc_score
 
 from pipeline import config
 from pipeline.common.metrics import bootstrap_ci, mrr_score, ndcg_at_k
-from pipeline.common.reranker import FEATURE_COLS_MINIMAL, load_features, to_xy, train_gbdt
+from pipeline.common.reranker import FEATURE_COLS_MINIMAL, feature_columns, load_features, to_xy, train_gbdt
 
 METRICS = [
     ("auc", lambda y, s: roc_auc_score(y, s), True),
@@ -46,6 +53,77 @@ METRICS = [
     ("ndcg5", lambda y, s: ndcg_at_k(y, s, 5), False),
     ("ndcg10", lambda y, s: ndcg_at_k(y, s, 10), False),
 ]
+
+# Incremental feature groups added on top of FEATURE_COLS_MINIMAL, one at a time, to
+# isolate which group actually drives the gain over the baseline (Q3.3). Built from
+# pipeline/features.py's own four sub-requirement groupings (module docstring
+# points 1-4); position features are already in FEATURE_COLS_MINIMAL, so "position" is
+# the starting group, not an addition.
+GROUP_CLICK_HISTORY = ["hist_len", "hist_category_match_frac", "hist_category_match_recency", "hist_embed_sim"]
+GROUP_SESSION = ["session_position"]  # user_avg_read_time/scroll_pct handled per-dataset below
+GROUP_ARTICLE_CONTEXT = ["category_match"]  # popularity/freshness/position already in the baseline
+
+
+def _incremental_feature_sets(dataset: str, available_cols: list[str]) -> list[tuple[str, list[str]]]:
+    """(stage_name, feature_columns) pairs, each stage = baseline + all groups up to
+    and including this one. Only includes columns that actually exist for this
+    dataset (EB-NeRD's two dwell-time columns don't exist for MIND)."""
+    session_cols = list(GROUP_SESSION)
+    if dataset == "ebnerd":
+        session_cols += [c for c in ("user_avg_read_time", "user_avg_scroll_pct") if c in available_cols]
+
+    stages = [("baseline_position_only", list(FEATURE_COLS_MINIMAL))]
+    running = list(FEATURE_COLS_MINIMAL)
+    for stage_name, group in [
+        ("+click_history", GROUP_CLICK_HISTORY),
+        ("+session", session_cols),
+        ("+article_context", GROUP_ARTICLE_CONTEXT),
+    ]:
+        running = running + [c for c in group if c in available_cols and c not in running]
+        stages.append((stage_name, list(running)))
+    return stages
+
+
+def _grouped_scores(val_df, score_col: str):
+    ordered = val_df.sort_values(["impression_id", "candidate_position"])
+    grouped = ordered.groupby("impression_id", sort=False)
+    labels_g = grouped["label"].apply(lambda s: s.to_numpy()).tolist()
+    scores_g = grouped[score_col].apply(lambda s: s.to_numpy()).tolist()
+    return labels_g, scores_g
+
+
+def run_incremental(dataset: str, train_df, val_df) -> dict:
+    """Q3.3 per-feature-group ablation: baseline -> +click-history -> +session ->
+    +article-context (== full model), reporting AUC at each stage so the report can
+    say which group contributes what, rather than only "baseline vs. everything"."""
+    available = feature_columns(train_df)
+    stages = _incremental_feature_sets(dataset, available)
+
+    stage_report = {}
+    prev_auc = None
+    for stage_name, cols in stages:
+        X_train, y_train = to_xy(train_df, cols)
+        X_val, _ = to_xy(val_df, cols)
+        model = train_gbdt(X_train, y_train, seed=config.RANDOM_SEED)
+        val_df[f"_stage_{stage_name}"] = model.predict_proba(X_val)[:, 1]
+        labels_g, scores_g = _grouped_scores(val_df, f"_stage_{stage_name}")
+
+        auc_vals = np.array([
+            roc_auc_score(y, s) for y, s in zip(labels_g, scores_g)
+            if 0 < np.asarray(y).sum() < len(y)
+        ])
+        mean, lo, hi = bootstrap_ci(auc_vals, seed=config.RANDOM_SEED)
+        delta_from_prev = None if prev_auc is None else mean - prev_auc
+        stage_report[stage_name] = {
+            "features": cols, "auc_mean": mean, "auc_ci_low": lo, "auc_ci_high": hi,
+            "auc_delta_from_previous_stage": delta_from_prev,
+        }
+        print(f"[{dataset}] ablation stage {stage_name:22s} n_feat={len(cols):2d}  "
+              f"AUC={mean:.4f} [{lo:.4f},{hi:.4f}]"
+              + (f"  (+{delta_from_prev:+.4f} vs prev stage)" if delta_from_prev is not None else ""))
+        prev_auc = mean
+        val_df.drop(columns=[f"_stage_{stage_name}"], inplace=True)
+    return stage_report
 
 
 def run(dataset: str) -> dict:
@@ -105,6 +183,9 @@ def run(dataset: str) -> dict:
         }
         print(f"[{dataset}] {metric_name:7s} baseline={b_mean:.4f}  full={f_mean:.4f}  "
               f"delta={d_mean:+.4f} [{d_lo:+.4f}, {d_hi:+.4f}]  significant={excludes_zero}")
+
+    print(f"[{dataset}] -- Q3.3 per-feature-group incremental ablation --")
+    report["incremental_feature_group_ablation"] = run_incremental(dataset, train_df, val_df)
 
     with open(out_dir / "ablation.json", "w") as f:
         json.dump(report, f, indent=2)

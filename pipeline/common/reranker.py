@@ -17,7 +17,12 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 # EB-NeRD gets two extra columns (dwell time) that MIND's raw files simply don't
 # carry -- see pipeline/features.py's module docstring -- so the reranker is always
 # trained per-dataset with whatever columns that dataset's feature table actually has.
-NON_FEATURE_COLUMNS = {"impression_id", "user_id", "candidate_id", "label"}
+NON_FEATURE_COLUMNS = {
+    "impression_id", "user_id", "candidate_id", "label",
+    # diagnostic-only, unclamped freshness kept for test_no_leakage.py -- see
+    # pipeline/features.py's CORE_COLUMNS comment. Never fed to the model.
+    "freshness_hours_raw",
+}
 
 # Q3's "reproduced baseline": a deliberately minimal, non-personalized feature set
 # (popularity + freshness + where it was shown) -- no click-history or session signal

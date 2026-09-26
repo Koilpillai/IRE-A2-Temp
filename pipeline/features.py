@@ -88,9 +88,11 @@ from pipeline.common.popularity import train_popularity
 CORE_COLUMNS = [
     "impression_id", "user_id", "candidate_id", "label",
     "hist_len", "hist_category_match_frac", "hist_category_match_recency", "hist_embed_sim",
-    "session_position", "popularity_log", "freshness_hours", "category_match",
+    "session_position", "popularity_log", "freshness_hours", "freshness_hours_raw", "category_match",
     "candidate_position", "candidate_position_norm",
 ]
+# freshness_hours_raw is diagnostic-only (the UNCLAMPED freshness value, see below) --
+# never fed to the reranker; pipeline.common.reranker.NON_FEATURE_COLUMNS excludes it.
 # EB-NeRD-only: MIND's raw files carry neither per-item history timestamps nor any
 # dwell-time/scroll signal, so these two columns simply don't exist for MIND -- the
 # reranker (Q2) trains one model per dataset anyway, so the two feature sets don't
@@ -272,14 +274,32 @@ def build_features(dataset: str, split: str, sample: int | None = None) -> Path:
                     (cat_weight.get(cand_cat, 0.0) / total_w) if (cand_cat is not None and total_w > 0) else 0.0)
                 rows["hist_embed_sim"].append(bf.cosine(cand_vec, hist_vec))
                 rows["session_position"].append(ctx["sess_pos"])
-                rows["popularity_log"].append(float(np.log1p(popularity.get(cand, 0))))
+                # Leave-one-impression-out on TRAIN: `popularity` is a train-split-wide
+                # click count (pipeline.common.popularity.train_popularity), so
+                # featurizing a TRAIN row whose own candidate has label==1 would
+                # otherwise fold that exact click into its own popularity feature -- a
+                # direct label leak (100% of train positives measured popularity_log>0
+                # pre-fix, vs ~98% of negatives; see test_features_popularity_excludes_
+                # own_click). Val rows need no adjustment: val's own labels were never
+                # counted into train_popularity in the first place.
+                pop_count = popularity.get(cand, 0)
+                if split == "train" and label == 1:
+                    pop_count -= 1
+                rows["popularity_log"].append(float(np.log1p(max(pop_count, 0))))
                 if is_ebnerd:
                     pub = publish_time_by_article.get(cand)
-                    fresh = max((ctx["ref_time"] - pub) / np.timedelta64(1, "h"), 0.0) if pub is not None else fallback_fresh
+                    fresh_raw = (ctx["ref_time"] - pub) / np.timedelta64(1, "h") if pub is not None else fallback_fresh
                 else:
                     t0_first = first_appearance.get(cand)
-                    fresh = max((ctx["ref_time"] - t0_first) / np.timedelta64(1, "h"), 0.0) if t0_first is not None else fallback_fresh
-                rows["freshness_hours"].append(float(fresh))
+                    fresh_raw = (ctx["ref_time"] - t0_first) / np.timedelta64(1, "h") if t0_first is not None else fallback_fresh
+                # Clamped for the model-facing feature (real-world clock skew/batching
+                # can put a publish/first-appearance timestamp a few seconds after the
+                # impression that first surfaces it); the UNCLAMPED value is kept in
+                # freshness_hours_raw so test_no_leakage.py can tell real leakage
+                # (large, systematic negative values) apart from harmless near-zero
+                # noise -- clamping alone would make that test unable to ever fail.
+                rows["freshness_hours"].append(float(max(fresh_raw, 0.0)))
+                rows["freshness_hours_raw"].append(float(fresh_raw))
                 rows["category_match"].append(int(cand_cat is not None and cand_cat == top_cat))
                 rows["candidate_position"].append(pos)
                 rows["candidate_position_norm"].append(pos / max(len(final_cands) - 1, 1))
