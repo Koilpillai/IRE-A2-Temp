@@ -44,3 +44,7 @@ FEATURE_HISTORY_WINDOW = 50  # matches A1's retrieval HISTORY_WINDOW, for a cons
 HIST_DECAY_RANK = 0.9        # per-position decay for recency weighting when no per-item timestamp exists (MIND)
 HIST_HALF_LIFE_HOURS = 72.0  # 3-day half-life for time-based recency decay (EB-NeRD, which has per-item timestamps)
 FEATURE_BUILD_CHUNK = 20_000  # impressions per chunk when exploding to (impression, candidate) rows
+RETRIEVAL_CANDIDATE_K = 100   # per-channel top-K (BM25, embedding) retrieved as the reranker's
+                               # candidate pool -- Q2.1 asks for "Assignment 1's candidate generator
+                               # to retrieve top-K candidates (K ~ 100-200)"; the union of two
+                               # independent top-100 lists lands in that range

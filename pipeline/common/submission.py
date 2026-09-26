@@ -7,6 +7,13 @@ where rank_of_candidate_i is that candidate's rank (1 = most likely to be clicke
 among the SAME impression's candidates, positionally aligned to the order the
 candidates were given in (verified against both datasets' Codabench "Evaluation" /
 "Submission Guidelines" pages -- see README).
+
+`hybrid_score` is NOT the final ranking function anymore -- pipeline/generate_
+submission.py now ranks candidates with the trained Q2 GBDT (Q5 must reflect "the
+full two-stage pipeline", not Stage 1 alone). It's kept because the GBDT's own
+`candidate_position` feature was defined at training time as a candidate's rank
+under this exact fused score (see pipeline/features.py), so serving still calls it
+to compute that one feature consistently with training.
 """
 from __future__ import annotations
 
